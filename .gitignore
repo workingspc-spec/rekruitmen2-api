@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env.local
+.env.ngrok
+.env.production
+.env.*
+
+# Logs
+logs/
+*.log
+
+# Editor / OS
+.vscode/
+.DS_Store
