@@ -5,14 +5,15 @@ const router = express.Router();
 
 /**
  * =====================================================================
- * MODULE: SELECTION PROCESS (FINAL CLEANED VERSION)
+ * MODULE: SELECTION PROCESS (TRIGGER-ALIGNED VERSION)
  * =====================================================================
- * LATEST UPDATES (2026-02-05):
+ * LATEST UPDATES (2026-02-13):
+ * ✅ CRITICAL FIX: Removed manual INSERT to triilpermintaankaryawan
+ * ✅ CRITICAL FIX: Shadow record creation BEFORE trigger execution
+ * ✅ CRITICAL FIX: Consistent kar_Nik casing (capital N)
  * ✅ No-Show Buffer Days — Otomatis adjust SLA saat kandidat tidak datang
  * ✅ Re-open Edit Tanggal — User bisa edit setelah No-Show
  * ✅ Fair KPI Calculation — HRD tidak di-penalti karena kandidat flaky
- * ✅ Fixed: Duplikasi route /decision
- * ✅ Fixed: Query optimization untuk No-Show update
  * 
  * STATUS FLOW:
  * 0: Belum diputuskan
@@ -22,6 +23,11 @@ const router = express.Router();
  * 4: Pelatihan (Training - Pending)
  * 5: Diterima - Menunggu Onboarding (Approved, Not Yet Hired)
  * 6: Diterima - Gagal Onboarding (Approved but Failed to Join)
+ * 
+ * TRIGGER INTEGRATION:
+ * - tlistpelamar_after_update: AUTO INSERT triilpermintaankaryawan (status=1)
+ * - tlistpelamar_after_update: AUTO UPDATE tgl_diterima/tgl_tidakditerima
+ * - tlistpelamar_after_update: AUTO UPDATE trekruitmen.rkt_status
  * =====================================================================
  */
 
@@ -49,13 +55,6 @@ async function logActivity(connection, data) {
 // =====================================================================
 async function generateNIK(connection) {
     const year = new Date().getFullYear();
-
-    // ================================================================
-    // 🔥 CRITICAL FIX: RACE CONDITION PREVENTION
-    // ================================================================
-    // Bug lama: 2 transaksi paralel bisa baca current_val yang sama
-    // Fix: Gunakan FOR UPDATE untuk lock row SEBELUM baca nilai
-    // ================================================================
 
     // 1. Pastikan row exists (create jika belum ada)
     await connection.execute(
@@ -106,12 +105,6 @@ async function upsertEvaluasiSchedule(connection, tpk_nomor, tlp_rkt_nomor, jeni
 // =====================================================================
 // HELPER: Hitung Buffer Days untuk No-Show (FAIR CALCULATION)
 // =====================================================================
-/**
- * Logika Progressive Buffer:
- * - No-Show PERTAMA → +7 hari kerja
- * - No-Show KEDUA → +5 hari kerja
- * - No-Show KETIGA+ → +3 hari kerja per kejadian
- */
 async function calculateNoShowBuffer(connection, tpk_nomor) {
     const [countResult] = await connection.execute(
         `SELECT COUNT(*) AS no_show_count
@@ -424,13 +417,13 @@ router.get('/candidates', async (req, res) => {
 
         // --- Filter by stage ---
         const stageMap = {
-            shortlist:           ` AND 1=1`,  // ✅ TAMBAHKAN: Show all (default behavior)
+            shortlist:           ` AND 1=1`,
             verified:            ` AND lp.tlp_status = 1`,
-            test:                ` AND lp.tgl_tes IS NOT NULL`,  // ✅ UBAH: tested → test
-            interview_user:      ` AND lp.tgl_interviewuser IS NOT NULL`,  // ✅ UBAH: interviewed_user → interview_user
-            interview_hrd:       ` AND lp.tgl_interviewhrd IS NOT NULL`,  // ✅ UBAH: interviewed_hrd → interview_hrd
+            test:                ` AND lp.tgl_tes IS NOT NULL`,
+            interview_user:      ` AND lp.tgl_interviewuser IS NOT NULL`,
+            interview_hrd:       ` AND lp.tgl_interviewhrd IS NOT NULL`,
             decided:             ` AND lp.statusterakhir <> 0`,
-            pending:             ` AND lp.statusterakhir = 0`,  // ✅ TAMBAHKAN untuk konsistensi
+            pending:             ` AND lp.statusterakhir = 0`,
             training:            ` AND lp.statusterakhir = 4`,
             approved_pending:    ` AND lp.statusterakhir = 5`,
             hired:               ` AND lp.statusterakhir = 1`
@@ -470,6 +463,9 @@ router.get('/candidates', async (req, res) => {
     }
 });
 
+// CONTINUATION OF selection.js - PART 2 (CRITICAL SECTIONS)
+
+// ... (continuing from part 1)
 
 /**
  * GET /api/selection/candidate-detail
@@ -486,7 +482,6 @@ router.get('/candidate-detail', async (req, res) => {
     }
 
     try {
-        // --- Cek di tlistpelamar ---
         const [checkShortlist] = await db.execute(
             'SELECT * FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?',
             [tpk_nomor, tlp_rkt_nomor]
@@ -545,7 +540,6 @@ router.get('/candidate-detail', async (req, res) => {
             };
         }
 
-        // --- Ambil data dari tabel baru ---
         const [evaluasiData] = await db.execute(
             `SELECT * FROM t_evaluasi 
              WHERE eval_tlp_tpk_nomor = ? AND eval_tlp_rkt_nomor = ?
@@ -602,9 +596,6 @@ router.get('/candidate-detail', async (req, res) => {
 // SECTION 3: VERIFICATION
 // =====================================================================
 
-/**
- * PUT /api/selection/verify
- */
 router.put('/verify', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor } = req.body;
     const connection = await db.getConnection();
@@ -648,9 +639,6 @@ router.put('/verify', async (req, res) => {
 // SECTION 4: SCHEDULING (Tes & Interview)
 // =====================================================================
 
-/**
- * PUT /api/selection/schedule
- */
 router.put('/schedule', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor, tgl_tes, tgl_interviewuser, tgl_interviewhrd } = req.body;
 
@@ -673,7 +661,6 @@ router.put('/schedule', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Cek kandidat ada ---
         const [checkRows] = await connection.execute(
             'SELECT tlp_status FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ? FOR UPDATE',
             [tpk_nomor, tlp_rkt_nomor]
@@ -687,7 +674,6 @@ router.put('/schedule', async (req, res) => {
             });
         }
 
-        // --- Auto-verify jika belum ---
         if (checkRows[0].tlp_status === 0) {
             await connection.execute(
                 'UPDATE tlistpelamar SET tlp_status = 1 WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?',
@@ -695,7 +681,6 @@ router.put('/schedule', async (req, res) => {
             );
         }
 
-        // --- Build dynamic UPDATE untuk tlistpelamar ---
         let updateFields = [];
         let params = [];
 
@@ -710,12 +695,10 @@ router.put('/schedule', async (req, res) => {
             params
         );
 
-        // --- Upsert ke t_evaluasi ---
         if (tgl_tes)            await upsertEvaluasiSchedule(connection, tpk_nomor, tlp_rkt_nomor, 'TES',            tgl_tes);
         if (tgl_interviewuser)  await upsertEvaluasiSchedule(connection, tpk_nomor, tlp_rkt_nomor, 'INTERVIEW_USER', tgl_interviewuser);
         if (tgl_interviewhrd)   await upsertEvaluasiSchedule(connection, tpk_nomor, tlp_rkt_nomor, 'INTERVIEW_HRD',  tgl_interviewhrd);
 
-        // --- Log ---
         await logActivity(connection, {
             tpk_nomor,
             tlp_rkt_nomor,
@@ -729,7 +712,7 @@ router.put('/schedule', async (req, res) => {
         res.json({
             success: true,
             message: 'Jadwal berhasil disimpan',
-            data: {}  // ✅ TAMBAHKAN untuk konsistensi
+            data: {}
         });
 
     } catch (error) {
@@ -750,10 +733,6 @@ router.put('/schedule', async (req, res) => {
 // SECTION 5: EVALUASI (TES & INTERVIEW RESULTS)
 // =====================================================================
 
-/**
- * POST /api/selection/evaluasi
- * Simpan hasil tes / interview (row baru per submission)
- */
 router.post('/evaluasi', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor, jenis, tanggal, nilai, keterangan, evaluator, status } = req.body;
 
@@ -788,7 +767,6 @@ router.post('/evaluasi', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Cek kandidat ada ---
         const [checkKandidat] = await connection.execute(
             'SELECT 1 FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?',
             [tpk_nomor, tlp_rkt_nomor]
@@ -802,8 +780,7 @@ router.post('/evaluasi', async (req, res) => {
             });
         }
 
-        // --- Insert evaluasi ---
-        const [result] = await connection.execute(
+        await connection.execute(
             `INSERT INTO t_evaluasi 
             (eval_tlp_tpk_nomor, eval_tlp_rkt_nomor, eval_jenis, eval_tanggal, eval_nilai, eval_keterangan, eval_evaluator, eval_status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -840,10 +817,6 @@ router.post('/evaluasi', async (req, res) => {
 });
 
 
-/**
- * PUT /api/selection/evaluasi/:eval_id
- * Update hasil evaluasi yang sudah ada
- */
 router.put('/evaluasi/:eval_id', async (req, res) => {
     const { eval_id }  = req.params;
     const { tanggal, nilai, keterangan, evaluator, status } = req.body;
@@ -853,7 +826,6 @@ router.put('/evaluasi/:eval_id', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Build dynamic update ---
         let updateFields = [];
         let params = [];
 
@@ -891,7 +863,7 @@ router.put('/evaluasi/:eval_id', async (req, res) => {
         res.json({
             success: true,
             message: 'Evaluasi berhasil diupdate',
-            data: null  // ✅ TAMBAHKAN untuk konsistensi
+            data: null
         });
 
     } catch (error) {
@@ -912,10 +884,6 @@ router.put('/evaluasi/:eval_id', async (req, res) => {
 // SECTION 6: PELATIHAN MANAGEMENT
 // =====================================================================
 
-/**
- * POST /api/selection/pelatihan/start
- * Mulai pelatihan — requires statusterakhir = 4
- */
 router.post('/pelatihan/start', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor, jenis, tgl_mulai, durasi_hari, instruktur, lokasi, keterangan } = req.body;
 
@@ -931,7 +899,6 @@ router.post('/pelatihan/start', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Cek kandidat & status ---
         const [checkKandidat] = await connection.execute(
             'SELECT statusterakhir FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ? FOR UPDATE',
             [tpk_nomor, tlp_rkt_nomor]
@@ -953,7 +920,6 @@ router.post('/pelatihan/start', async (req, res) => {
             });
         }
 
-        // --- Hitung tanggal selesai rencana ---
         const mulaiDate   = tgl_mulai ? new Date(tgl_mulai) : new Date();
         const durasi      = parseInt(durasi_hari) || 30;
         const selesaiDate = new Date(mulaiDate);
@@ -962,7 +928,6 @@ router.post('/pelatihan/start', async (req, res) => {
         const tglMulaiStr   = mulaiDate.toISOString().split('T')[0];
         const tglSelesaiStr = selesaiDate.toISOString().split('T')[0];
 
-        // --- Insert pelatihan ---
         const [result] = await connection.execute(
             `INSERT INTO t_pelatihan 
             (pel_tlp_tpk_nomor, pel_tlp_rkt_nomor, pel_jenis, pel_tgl_mulai, pel_tgl_selesai_rencana, 
@@ -1016,10 +981,6 @@ router.post('/pelatihan/start', async (req, res) => {
 });
 
 
-/**
- * PUT /api/selection/pelatihan/:pel_id/complete
- * Selesaikan pelatihan — LULUS → status 5, GAGAL → status 2
- */
 router.put('/pelatihan/:pel_id/complete', async (req, res) => {
     const { pel_id } = req.params;
     const { status, nilai, keterangan, tgl_selesai } = req.body;
@@ -1039,7 +1000,6 @@ router.put('/pelatihan/:pel_id/complete', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Get pelatihan ---
         const [pelatihanData] = await connection.execute(
             'SELECT * FROM t_pelatihan WHERE pel_id = ? FOR UPDATE',
             [pel_id]
@@ -1058,7 +1018,6 @@ router.put('/pelatihan/:pel_id/complete', async (req, res) => {
         const tlp_rkt_nomor = pelatihan.pel_tlp_rkt_nomor;
         const tglSelesai    = tgl_selesai || new Date().toISOString().split('T')[0];
 
-        // --- Update t_pelatihan ---
         await connection.execute(
             `UPDATE t_pelatihan 
              SET pel_status = ?, pel_nilai = ?, pel_keterangan = ?, pel_tgl_selesai_aktual = ?
@@ -1066,55 +1025,28 @@ router.put('/pelatihan/:pel_id/complete', async (req, res) => {
             [status, nilai || null, keterangan || null, tglSelesai, pel_id]
         );
 
-        // --- Update statusterakhir di tlistpelamar ---
-        // LULUS  → 5 (Approved, menunggu onboarding)
-        // GAGAL  → 2 (Tidak diterima)
         const newStatus = status === 'COMPLETED' ? 5 : 2;
 
         // ================================================================
-        // ⚠️ LEGACY TRIGGER SAFE UPDATE
+        // ⚠️ TRIGGER SAFE: Tambahkan WHERE untuk idempotency
         // ================================================================
-        // Tambahkan WHERE statusterakhir = 4 untuk idempotency.
-        // Trigger akan handle tgl_tidakditerima otomatis.
-        
-        if (newStatus === 5) {
-            const [updateResult] = await connection.execute(
-                `UPDATE tlistpelamar 
-                 SET statusterakhir = 5 
-                 WHERE tlp_tpk_nomor = ? 
-                   AND tlp_rkt_nomor = ?
-                   AND statusterakhir = 4`,
-                [tpk_nomor, tlp_rkt_nomor]
-            );
+        const [updateResult] = await connection.execute(
+            `UPDATE tlistpelamar 
+             SET statusterakhir = ? 
+             WHERE tlp_tpk_nomor = ? 
+               AND tlp_rkt_nomor = ?
+               AND statusterakhir = 4`,
+            [newStatus, tpk_nomor, tlp_rkt_nomor]
+        );
 
-            if (updateResult.affectedRows === 0) {
-                await connection.rollback();
-                return res.status(400).json({
-                    success: false,
-                    message: 'Status kandidat sudah berubah atau tidak dalam status Training. Silakan refresh halaman.'
-                });
-            }
-        } else {
-            // Status = 2 (Rejected), trigger akan set tgl_tidakditerima otomatis
-            const [updateResult] = await connection.execute(
-                `UPDATE tlistpelamar 
-                 SET statusterakhir = 2 
-                 WHERE tlp_tpk_nomor = ? 
-                   AND tlp_rkt_nomor = ?
-                   AND statusterakhir = 4`,
-                [tpk_nomor, tlp_rkt_nomor]
-            );
-
-            if (updateResult.affectedRows === 0) {
-                await connection.rollback();
-                return res.status(400).json({
-                    success: false,
-                    message: 'Status kandidat sudah berubah atau tidak dalam status Training. Silakan refresh halaman.'
-                });
-            }
+        if (updateResult.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message: 'Status kandidat sudah berubah atau tidak dalam status Training. Silakan refresh halaman.'
+            });
         }
 
-        // --- Log ---
         await logActivity(connection, {
             tpk_nomor,
             tlp_rkt_nomor,
@@ -1153,13 +1085,9 @@ router.put('/pelatihan/:pel_id/complete', async (req, res) => {
 
 
 // =====================================================================
-// SECTION 7: ONBOARDING PROCESS
+// SECTION 7: ONBOARDING PROCESS (TRIGGER-ALIGNED)
 // =====================================================================
 
-/**
- * POST /api/selection/onboarding/start
- * Mulai onboarding — requires statusterakhir = 5
- */
 router.post('/onboarding/start', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor, tgl_mulai, keterangan } = req.body;
 
@@ -1175,7 +1103,6 @@ router.post('/onboarding/start', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Cek kandidat & status ---
         const [checkKandidat] = await connection.execute(
             'SELECT statusterakhir FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ? FOR UPDATE',
             [tpk_nomor, tlp_rkt_nomor]
@@ -1199,7 +1126,6 @@ router.post('/onboarding/start', async (req, res) => {
 
         const tglMulaiStr = tgl_mulai || new Date().toISOString().split('T')[0];
 
-        // --- Insert onboarding ---
         const [result] = await connection.execute(
             `INSERT INTO t_onboarding 
             (onb_tlp_tpk_nomor, onb_tlp_rkt_nomor, onb_tgl_mulai, onb_status, onb_keterangan)
@@ -1240,10 +1166,6 @@ router.post('/onboarding/start', async (req, res) => {
 });
 
 
-/**
- * PUT /api/selection/onboarding/:onb_id/checklist
- * Update item-item checklist onboarding
- */
 router.put('/onboarding/:onb_id/checklist', async (req, res) => {
     const { onb_id } = req.params;
     const {
@@ -1260,7 +1182,6 @@ router.put('/onboarding/:onb_id/checklist', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Build dynamic update ---
         let updateFields = [];
         let params = [];
 
@@ -1299,7 +1220,7 @@ router.put('/onboarding/:onb_id/checklist', async (req, res) => {
         res.json({
             success: true,
             message: 'Checklist onboarding berhasil diupdate',
-            data: {}  // ✅ TAMBAHKAN untuk konsistensi
+            data: {}
         });
 
     } catch (error) {
@@ -1319,7 +1240,7 @@ router.put('/onboarding/:onb_id/checklist', async (req, res) => {
 /**
  * PUT /api/selection/onboarding/:onb_id/complete
  * =====================================================================
- * INI YANG TRIGGER HIRING PROCESS
+ * 🔥 CRITICAL: HIRING PROCESS - FULL TRIGGER ALIGNMENT
  * =====================================================================
  */
 router.put('/onboarding/:onb_id/complete', async (req, res) => {
@@ -1341,7 +1262,6 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // --- Get onboarding data ---
         const [onboardingData] = await connection.execute(
             'SELECT * FROM t_onboarding WHERE onb_id = ? FOR UPDATE',
             [onb_id]
@@ -1441,9 +1361,14 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 // INSERT IGNORE = skip jika sudah ada, prevent duplicate key error.
                 // ================================================================
                 await connection.execute(
-                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status) 
-                     VALUES (?, ?, 1)`,
-                    [tlp_rkt_nomor, candidateName]
+                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status, rkt_tgllahir, rkt_jenkel) 
+                     VALUES (?, ?, 1, ?, ?)`,
+                    [
+                        tlp_rkt_nomor, 
+                        candidateName,
+                        candidateData.tanggal_lahir || null,
+                        candidateData.jenis_kelamin?.toLowerCase().includes('laki') ? 1 : 0
+                    ]
                 );
 
             } else {
@@ -1467,11 +1392,13 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             // --- Generate NIK ---
             const newNIK = await generateNIK(connection);
 
-            // --- Insert ke tkaryawan ---
+            // ================================================================
+            // 🔥 CRITICAL: INSERT ke tkaryawan DENGAN CASING kar_Nik YANG BENAR
+            // ================================================================
             if (isFromApplicant) {
                 await connection.execute(
                     `INSERT INTO tkaryawan (
-                        kar_nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
+                        kar_Nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
                         kar_alamat, kar_status_kawin, kar_warganegara, kar_agama, kar_gol_darah,
                         kar_status_tinggal, kar_notelp, kar_noidentitas, kar_email,
                         kar_jab_kode, kar_bagian, kar_pendidikanterakhir, kar_jurusan,
@@ -1517,7 +1444,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             } else {
                 await connection.execute(
                     `INSERT INTO tkaryawan (
-                        kar_nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
+                        kar_Nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
                         kar_alamat, kar_status_kawin, kar_warganegara, kar_agama, kar_gol_darah,
                         kar_status_tinggal, kar_notelp, kar_noidentitas, kar_email, kar_ibukandung,
                         kar_jab_kode, kar_bagian, kar_pendidikanterakhir, kar_jurusan,
@@ -1559,12 +1486,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 // ================================================================
                 // Trigger 'tlistpelamar_after_update' akan OTOMATIS update
                 // trekruitmen.rkt_status = 1 saat statusterakhir = 1.
-                // Backend TIDAK BOLEH update manual untuk mencegah:
-                // 1. Double execution jika trigger logic berubah
-                // 2. Race condition antara backend vs trigger
-                // 3. Inkonsistensi data jika salah satu gagal
-                // 
-                // RULE: Trigger = single source of truth untuk trekruitmen
+                // Backend TIDAK BOLEH update manual untuk mencegah race condition.
                 // ================================================================
             }
 
@@ -1577,12 +1499,16 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             );
 
             // ================================================================
-            // ⚠️ LEGACY TRIGGER SAFE UPDATE
+            // 🔥 CRITICAL: UPDATE statusterakhir - TRIGGER WILL HANDLE THE REST
             // ================================================================
-            // CATATAN: Trigger akan set tgl_diterima otomatis saat statusterakhir = 1.
-            // Kita hanya set statusterakhir, biarkan trigger handle tgl_diterima.
-            // Tambahkan WHERE statusterakhir <> 1 untuk IDEMPOTENCY (prevent double update).
-            
+            // Trigger 'tlistpelamar_after_update' akan OTOMATIS:
+            // 1. UPDATE tgl_diterima = NOW()
+            // 2. INSERT ke triilpermintaankaryawan (RPK)
+            // 3. UPDATE trekruitmen.rkt_status = 1 (jika dari rekruitmen)
+            // 
+            // Backend HANYA update statusterakhir, biarkan trigger handle sisanya.
+            // Tambahkan WHERE statusterakhir <> 1 untuk IDEMPOTENCY.
+            // ================================================================
             const [updateResult] = await connection.execute(
                 `UPDATE tlistpelamar 
                  SET statusterakhir = 1
@@ -1637,46 +1563,16 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 [tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor]
             );
 
-
             // ================================================================
-            // ⚠️ LEGACY TRIGGER COEXISTENCE FIX
+            // ⚠️ REMOVED: Manual INSERT ke triilpermintaankaryawan
             // ================================================================
-            // CATATAN: Trigger 'tlistpelamar_after_update' akan otomatis INSERT
+            // ALASAN: Trigger 'tlistpelamar_after_update' sudah handle INSERT
             // ke triilpermintaankaryawan saat statusterakhir = 1.
-            // Kita harus CHECK dulu apakah trigger sudah insert SEBELUM kita insert manual.
-            // Ini mencegah DOUBLE INSERT yang akan menyebabkan error PK duplicate.
-            
-            const [existingRPK] = await connection.execute(
-                `SELECT 1 FROM triilpermintaankaryawan
-                 WHERE rpk_tpk_nomor = ?
-                   AND rpk_keterangannama = ?
-                 LIMIT 1`,
-                [tpk_nomor, candidateName]
-            );
-
-            // ✅ HANYA INSERT jika trigger BELUM insert
-            if (existingRPK.length === 0) {
-                const year  = new Date().getFullYear();
-                const month = String(new Date().getMonth() + 1).padStart(2, '0');
-
-                const [maxRPK] = await connection.execute(
-                    `SELECT COALESCE(MAX(CAST(LEFT(rpk_nomor, 3) AS UNSIGNED)), 0) AS max_nomor 
-                     FROM triilpermintaankaryawan 
-                     WHERE YEAR(rpk_tanggal) = ? FOR UPDATE`,
-                    [year]
-                );
-
-                const nextNomor   = String(maxRPK[0].max_nomor + 1).padStart(3, '0');
-                const newRPKNomor = `${nextNomor}/HRD/RPK/${month}/${year}`;
-
-                await connection.execute(
-                    `INSERT INTO triilpermintaankaryawan 
-                    (rpk_nomor, rpk_tanggal, rpk_tpk_nomor, rpk_jumlah, rpk_keterangannama) 
-                    VALUES (?, CURDATE(), ?, 1, ?)`,
-                    [newRPKNomor, tpk_nomor, candidateName]
-                );
-            }
-            // Jika sudah ada (trigger sudah insert), kita SKIP untuk mencegah double insert.
+            // Kita sudah prepare shadow record di trekruitmen (untuk t_applicant)
+            // sehingga trigger bisa menemukan nama kandidat.
+            // 
+            // Jika tetap di-INSERT manual → ERROR: Duplicate Entry
+            // ================================================================
 
             // --- Log ---
             await logActivity(connection, {
@@ -1709,7 +1605,6 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 [status, tglSelesai, keterangan || null, onb_id]
             );
 
-            // 🔥 BEDAKAN NO_SHOW vs CANCELLED
             const newStatus = status === 'NO_SHOW' ? 3 : 6;
 
             // ================================================================
@@ -1739,16 +1634,6 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             // NO-SHOW → SLA BUFFER + UNLOCK EDIT
             // ============================================================
             if (newStatus === 3) {
-
-                // ================================================================
-                // 🔥 CRITICAL FIX: NO-SHOW GUARD PER TRANSITION
-                // ================================================================
-                // Bug lama: guard mengunci SELAMANYA jika sudah ada 1x no-show
-                // Padahal desain = progressive buffer (1st=+7, 2nd=+5, 3rd+=+3)
-                // 
-                // Fix: Guard hanya untuk KANDIDAT + STATUS TRANSITION yang sama
-                // Kandidat boleh no-show lebih dari sekali di stage berbeda
-                // ================================================================
                 const [alreadyNoShow] = await connection.execute(
                     `SELECT 1
                     FROM t_selection_log
@@ -1761,9 +1646,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                     [tpk_nomor, tlp_rkt_nomor]
                 );
 
-                // ✅ Guard per transition: hanya block jika EXACT transition ini sudah tercatat
                 if (alreadyNoShow.length === 0) {
-
                     const bufferDays = await calculateNoShowBuffer(connection, tpk_nomor);
 
                     await connection.execute(
@@ -1786,6 +1669,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                     });
                 }
             }
+            
             await connection.commit();
 
             return res.json({
@@ -1810,19 +1694,18 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
     }
 });
 
-
 // =====================================================================
-// SECTION 8: FINAL DECISION (WITH NO-SHOW LOGIC)
+// SECTION 8: FINAL DECISION (WITH NO-SHOW LOGIC & INSTANT HIRE)
 // =====================================================================
 
 /**
  * PUT /api/selection/decision
- * ✅ STATUS: 100% CORRECT & OPTIMIZED
+ * ✅ TRIGGER-ALIGNED VERSION
  * Menangani keputusan akhir, otomatisasi No-Show, dan penyesuaian SLA.
  */
 router.put('/decision', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor, status_akhir, keterangan_no_show } = req.body;
-    const validStatuses = [0, 1, 2, 3, 4, 5, 6];  // ✅ SUDAH BENAR
+    const validStatuses = [0, 1, 2, 3, 4, 5, 6];
     const connection = await db.getConnection();
 
     if (!tpk_nomor || !tlp_rkt_nomor || !validStatuses.includes(parseInt(status_akhir))) {
@@ -1845,9 +1728,9 @@ router.put('/decision', async (req, res) => {
 
         const oldStatus = currentData[0].statusterakhir;
         const validTransitions = {
-            0: [1, 2, 3, 4, 5],     // ✅ SUDAH BENAR - BISA LANGSUNG HIRED
-            4: [5, 2],               
-            5: [1, 3, 6],           
+            0: [1, 2, 3, 4, 5],
+            4: [5, 2],
+            5: [1, 3, 6],
         };
         
         if (validTransitions[oldStatus] && !validTransitions[oldStatus].includes(parseInt(status_akhir))) {
@@ -1858,13 +1741,13 @@ router.put('/decision', async (req, res) => {
             });
         }
 
-        // 🔒 GUARD: Jika sudah HIRED (1), REJECT (2), atau NO SHOW (3), kunci tombol.
+        // Guard: Jika sudah HIRED (1), REJECT (2), atau NO SHOW (3), kunci tombol
         if ([1, 2, 3].includes(oldStatus)) {
             await connection.rollback();
             return res.status(400).json({ success: false, message: 'Keputusan sudah final dan tidak dapat diubah.' });
         }
 
-        // ✅ PRE-DECISION VALIDATION: Kandidat harus punya evaluasi sebelum diterima/training
+        // PRE-DECISION VALIDATION: Kandidat harus punya evaluasi sebelum diterima/training
         if ([4, 5].includes(parseInt(status_akhir))) {
             const [evalCheck] = await connection.execute(
                 `SELECT COUNT(*) as eval_count 
@@ -1896,7 +1779,6 @@ router.put('/decision', async (req, res) => {
             [status_akhir, tpk_nomor, tlp_rkt_nomor, oldStatus]
         );
 
-        // ✅ Guard: Jika UPDATE tidak mengubah apapun, rollback
         if (updateResult.affectedRows === 0) {
             await connection.rollback();
             return res.status(400).json({
@@ -2012,18 +1894,15 @@ router.put('/decision', async (req, res) => {
                 // ================================================================
                 // 🔥 CRITICAL FIX: SHADOW RECORD FOR TRIGGER COMPATIBILITY
                 // ================================================================
-                // Problem: Trigger 'tlistpelamar_after_update' mencari nama dari
-                // trekruitmen.rkt_nama, tapi kandidat dari t_applicant tidak ada
-                // di tabel trekruitmen.
-                // 
-                // Solution: Buat shadow record minimal (nomor + nama + status)
-                // agar trigger bisa menemukan nama saat INSERT triilpermintaankaryawan.
-                // INSERT IGNORE = skip jika sudah ada, prevent duplicate key error.
-                // ================================================================
                 await connection.execute(
-                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status) 
-                    VALUES (?, ?, 1)`,
-                    [tlp_rkt_nomor, candidateName]
+                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status, rkt_tgllahir, rkt_jenkel) 
+                    VALUES (?, ?, 1, ?, ?)`,
+                    [
+                        tlp_rkt_nomor, 
+                        candidateName,
+                        candidateData.tanggal_lahir || null,
+                        candidateData.jenis_kelamin?.toLowerCase().includes('laki') ? 1 : 0
+                    ]
                 );
 
             } else {
@@ -2047,11 +1926,13 @@ router.put('/decision', async (req, res) => {
             // --- Generate NIK ---
             const newNIK = await generateNIK(connection);
 
-            // --- Insert ke tkaryawan ---
+            // ================================================================
+            // 🔥 CRITICAL: INSERT ke tkaryawan DENGAN CASING kar_Nik YANG BENAR
+            // ================================================================
             if (isFromApplicant) {
                 await connection.execute(
                     `INSERT INTO tkaryawan (
-                        kar_nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
+                        kar_Nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
                         kar_alamat, kar_status_kawin, kar_warganegara, kar_agama, kar_gol_darah,
                         kar_status_tinggal, kar_notelp, kar_noidentitas, kar_email,
                         kar_jab_kode, kar_bagian, kar_pendidikanterakhir, kar_jurusan,
@@ -2096,7 +1977,7 @@ router.put('/decision', async (req, res) => {
             } else {
                 await connection.execute(
                     `INSERT INTO tkaryawan (
-                        kar_nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
+                        kar_Nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
                         kar_alamat, kar_status_kawin, kar_warganegara, kar_agama, kar_gol_darah,
                         kar_status_tinggal, kar_notelp, kar_noidentitas, kar_email, kar_ibukandung,
                         kar_jab_kode, kar_bagian, kar_pendidikanterakhir, kar_jurusan,
@@ -2171,16 +2052,15 @@ router.put('/decision', async (req, res) => {
             );
 
             // ================================================================
-            // ⚠️ CRITICAL: TRIGGER WILL HANDLE triilpermintaankaryawan INSERT
+            // ⚠️ REMOVED: Manual INSERT ke triilpermintaankaryawan
             // ================================================================
-            // REMOVED: Manual INSERT to triilpermintaankaryawan
+            // CRITICAL: Trigger 'tlistpelamar_after_update' sudah handle INSERT
+            // ke triilpermintaankaryawan saat statusterakhir = 1.
             // 
-            // Reason: Database trigger 'tlistpelamar_after_update' sudah handle
-            // INSERT ke triilpermintaankaryawan saat statusterakhir = 1.
-            // Kita sudah prepare shadow record di trekruitmen (untuk t_applicant)
+            // Shadow record sudah dibuat di trekruitmen (untuk t_applicant)
             // sehingga trigger bisa menemukan nama kandidat.
             // 
-            // Jika tetap di-INSERT manual → ERROR: Duplicate Entry
+            // Manual INSERT akan menyebabkan ERROR: Duplicate Entry
             // ================================================================
 
             // --- Update response message ---
@@ -2213,15 +2093,11 @@ router.put('/decision', async (req, res) => {
     }
 });
 
-module.exports = router;
 
 // =====================================================================
 // SECTION 9: STATISTICS & SUMMARY
 // =====================================================================
 
-/**
- * GET /api/selection/summary/:tpk_nomor
- */
 router.get('/summary/:tpk_nomor', async (req, res) => {
     const { tpk_nomor } = req.params;
 
@@ -2264,9 +2140,6 @@ router.get('/summary/:tpk_nomor', async (req, res) => {
 });
 
 
-/**
- * DELETE /api/selection/remove
- */
 router.delete('/remove', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor } = req.body;
 
