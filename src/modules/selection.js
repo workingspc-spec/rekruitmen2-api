@@ -50,23 +50,41 @@ async function logActivity(connection, data) {
 async function generateNIK(connection) {
     const year = new Date().getFullYear();
 
-    // 1. Lock & increment sequence secara atomic
+    // ================================================================
+    // 🔥 CRITICAL FIX: RACE CONDITION PREVENTION
+    // ================================================================
+    // Bug lama: 2 transaksi paralel bisa baca current_val yang sama
+    // Fix: Gunakan FOR UPDATE untuk lock row SEBELUM baca nilai
+    // ================================================================
+
+    // 1. Pastikan row exists (create jika belum ada)
     await connection.execute(
         `INSERT INTO t_sequence_tracker (seq_name, current_val, year)
          VALUES ('NIK', ?, ?)
-         ON DUPLICATE KEY UPDATE current_val = current_val + 1`,
-        [year * 1000 + 1, year]
+         ON DUPLICATE KEY UPDATE seq_name = seq_name`,
+        [year * 1000, year]
     );
 
-    // 2. Ambil nilai terbaru (sudah aman)
+    // 2. Lock row + increment secara atomic
     const [res] = await connection.execute(
         `SELECT current_val 
          FROM t_sequence_tracker 
-         WHERE seq_name = 'NIK' AND year = ?`,
+         WHERE seq_name = 'NIK' AND year = ?
+         FOR UPDATE`,
         [year]
     );
 
-    return String(res[0].current_val);
+    const nextVal = res[0].current_val + 1;
+
+    // 3. Update dengan nilai baru
+    await connection.execute(
+        `UPDATE t_sequence_tracker 
+         SET current_val = ?
+         WHERE seq_name = 'NIK' AND year = ?`,
+        [nextVal, year]
+    );
+
+    return String(nextVal);
 }
 
 
@@ -406,13 +424,13 @@ router.get('/candidates', async (req, res) => {
 
         // --- Filter by stage ---
         const stageMap = {
+            shortlist:           ` AND 1=1`,  // ✅ TAMBAHKAN: Show all (default behavior)
             verified:            ` AND lp.tlp_status = 1`,
-            unverified:          ` AND lp.tlp_status = 0`,
-            tested:              ` AND lp.tgl_tes IS NOT NULL`,
-            interviewed_user:    ` AND lp.tgl_interviewuser IS NOT NULL`,
-            interviewed_hrd:     ` AND lp.tgl_interviewhrd IS NOT NULL`,
+            test:                ` AND lp.tgl_tes IS NOT NULL`,  // ✅ UBAH: tested → test
+            interview_user:      ` AND lp.tgl_interviewuser IS NOT NULL`,  // ✅ UBAH: interviewed_user → interview_user
+            interview_hrd:       ` AND lp.tgl_interviewhrd IS NOT NULL`,  // ✅ UBAH: interviewed_hrd → interview_hrd
             decided:             ` AND lp.statusterakhir <> 0`,
-            pending:             ` AND lp.statusterakhir = 0`,
+            pending:             ` AND lp.statusterakhir = 0`,  // ✅ TAMBAHKAN untuk konsistensi
             training:            ` AND lp.statusterakhir = 4`,
             approved_pending:    ` AND lp.statusterakhir = 5`,
             hired:               ` AND lp.statusterakhir = 1`
@@ -711,7 +729,7 @@ router.put('/schedule', async (req, res) => {
         res.json({
             success: true,
             message: 'Jadwal berhasil disimpan',
-            data: null  // ✅ TAMBAHKAN untuk konsistensi
+            data: {}  // ✅ TAMBAHKAN untuk konsistensi
         });
 
     } catch (error) {
@@ -804,8 +822,8 @@ router.post('/evaluasi', async (req, res) => {
 
         res.json({
             success: true,
-            message: 'Hasil evaluasi berhasil disimpan',
-            data: { eval_id: result.insertId }
+            message: 'Evaluasi berhasil diupdate',
+            data: {}
         });
 
     } catch (error) {
@@ -1053,16 +1071,47 @@ router.put('/pelatihan/:pel_id/complete', async (req, res) => {
         // GAGAL  → 2 (Tidak diterima)
         const newStatus = status === 'COMPLETED' ? 5 : 2;
 
+        // ================================================================
+        // ⚠️ LEGACY TRIGGER SAFE UPDATE
+        // ================================================================
+        // Tambahkan WHERE statusterakhir = 4 untuk idempotency.
+        // Trigger akan handle tgl_tidakditerima otomatis.
+        
         if (newStatus === 5) {
-            await connection.execute(
-                'UPDATE tlistpelamar SET statusterakhir = 5 WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?',
+            const [updateResult] = await connection.execute(
+                `UPDATE tlistpelamar 
+                 SET statusterakhir = 5 
+                 WHERE tlp_tpk_nomor = ? 
+                   AND tlp_rkt_nomor = ?
+                   AND statusterakhir = 4`,
                 [tpk_nomor, tlp_rkt_nomor]
             );
+
+            if (updateResult.affectedRows === 0) {
+                await connection.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'Status kandidat sudah berubah atau tidak dalam status Training. Silakan refresh halaman.'
+                });
+            }
         } else {
-            await connection.execute(
-                'UPDATE tlistpelamar SET statusterakhir = 2, tgl_tidakditerima = CURDATE() WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?',
+            // Status = 2 (Rejected), trigger akan set tgl_tidakditerima otomatis
+            const [updateResult] = await connection.execute(
+                `UPDATE tlistpelamar 
+                 SET statusterakhir = 2 
+                 WHERE tlp_tpk_nomor = ? 
+                   AND tlp_rkt_nomor = ?
+                   AND statusterakhir = 4`,
                 [tpk_nomor, tlp_rkt_nomor]
             );
+
+            if (updateResult.affectedRows === 0) {
+                await connection.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'Status kandidat sudah berubah atau tidak dalam status Training. Silakan refresh halaman.'
+                });
+            }
         }
 
         // --- Log ---
@@ -1250,7 +1299,7 @@ router.put('/onboarding/:onb_id/checklist', async (req, res) => {
         res.json({
             success: true,
             message: 'Checklist onboarding berhasil diupdate',
-            data: null  // ✅ TAMBAHKAN untuk konsistensi
+            data: {}  // ✅ TAMBAHKAN untuk konsistensi
         });
 
     } catch (error) {
@@ -1380,6 +1429,23 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 candidateData = applicantRows[0];
                 candidateName = candidateData.nama_lengkap;
 
+                // ================================================================
+                // 🔥 CRITICAL FIX: SHADOW RECORD FOR TRIGGER COMPATIBILITY
+                // ================================================================
+                // Problem: Trigger 'tlistpelamar_after_update' mencari nama dari
+                // trekruitmen.rkt_nama, tapi kandidat dari t_applicant tidak ada
+                // di tabel trekruitmen.
+                // 
+                // Solution: Buat shadow record minimal (nomor + nama + status)
+                // agar trigger bisa menemukan nama saat INSERT triilpermintaankaryawan.
+                // INSERT IGNORE = skip jika sudah ada, prevent duplicate key error.
+                // ================================================================
+                await connection.execute(
+                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status) 
+                     VALUES (?, ?, 1)`,
+                    [tlp_rkt_nomor, candidateName]
+                );
+
             } else {
                 const [rekruitmenRows] = await connection.execute(
                     'SELECT * FROM trekruitmen WHERE rkt_nomor = ? FOR UPDATE',
@@ -1488,11 +1554,18 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                     ]
                 );
 
-                // Update status di trekruitmen
-                await connection.execute(
-                    'UPDATE trekruitmen SET rkt_status = 1 WHERE rkt_nomor = ?',
-                    [tlp_rkt_nomor]
-                );
+                // ================================================================
+                // 🔥 CRITICAL: rkt_status DIUPDATE OTOMATIS OLEH TRIGGER
+                // ================================================================
+                // Trigger 'tlistpelamar_after_update' akan OTOMATIS update
+                // trekruitmen.rkt_status = 1 saat statusterakhir = 1.
+                // Backend TIDAK BOLEH update manual untuk mencegah:
+                // 1. Double execution jika trigger logic berubah
+                // 2. Race condition antara backend vs trigger
+                // 3. Inkonsistensi data jika salah satu gagal
+                // 
+                // RULE: Trigger = single source of truth untuk trekruitmen
+                // ================================================================
             }
 
             // --- Update t_onboarding dengan NIK baru ---
@@ -1503,11 +1576,30 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 [tglSelesai, newNIK, keterangan || null, onb_id]
             );
 
-            // --- Update tlistpelamar → status 1 (HIRED) ---
-            await connection.execute(
-                'UPDATE tlistpelamar SET statusterakhir = 1, tgl_diterima = CURDATE() WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?',
+            // ================================================================
+            // ⚠️ LEGACY TRIGGER SAFE UPDATE
+            // ================================================================
+            // CATATAN: Trigger akan set tgl_diterima otomatis saat statusterakhir = 1.
+            // Kita hanya set statusterakhir, biarkan trigger handle tgl_diterima.
+            // Tambahkan WHERE statusterakhir <> 1 untuk IDEMPOTENCY (prevent double update).
+            
+            const [updateResult] = await connection.execute(
+                `UPDATE tlistpelamar 
+                 SET statusterakhir = 1
+                 WHERE tlp_tpk_nomor = ? 
+                   AND tlp_rkt_nomor = ?
+                   AND statusterakhir <> 1`,
                 [tpk_nomor, tlp_rkt_nomor]
             );
+
+            // ✅ Guard: Jika UPDATE tidak mengubah apapun (sudah status 1), rollback
+            if (updateResult.affectedRows === 0) {
+                await connection.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'Kandidat sudah dalam status HIRED. Operasi dibatalkan untuk mencegah duplikasi.'
+                });
+            }
 
             // --- Update SLA completion ---
             await connection.execute(
@@ -1546,26 +1638,45 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             );
 
 
-            // --- Insert realisasi ke triilpermintaankaryawan ---
-            const year  = new Date().getFullYear();
-            const month = String(new Date().getMonth() + 1).padStart(2, '0');
-
-            const [maxRPK] = await connection.execute(
-                `SELECT COALESCE(MAX(CAST(LEFT(rpk_nomor, 3) AS UNSIGNED)), 0) AS max_nomor 
-                 FROM triilpermintaankaryawan 
-                 WHERE YEAR(rpk_tanggal) = ? FOR UPDATE`,
-                [year]
+            // ================================================================
+            // ⚠️ LEGACY TRIGGER COEXISTENCE FIX
+            // ================================================================
+            // CATATAN: Trigger 'tlistpelamar_after_update' akan otomatis INSERT
+            // ke triilpermintaankaryawan saat statusterakhir = 1.
+            // Kita harus CHECK dulu apakah trigger sudah insert SEBELUM kita insert manual.
+            // Ini mencegah DOUBLE INSERT yang akan menyebabkan error PK duplicate.
+            
+            const [existingRPK] = await connection.execute(
+                `SELECT 1 FROM triilpermintaankaryawan
+                 WHERE rpk_tpk_nomor = ?
+                   AND rpk_keterangannama = ?
+                 LIMIT 1`,
+                [tpk_nomor, candidateName]
             );
 
-            const nextNomor   = String(maxRPK[0].max_nomor + 1).padStart(3, '0');
-            const newRPKNomor = `${nextNomor}/HRD/RPK/${month}/${year}`;
+            // ✅ HANYA INSERT jika trigger BELUM insert
+            if (existingRPK.length === 0) {
+                const year  = new Date().getFullYear();
+                const month = String(new Date().getMonth() + 1).padStart(2, '0');
 
-            await connection.execute(
-                `INSERT INTO triilpermintaankaryawan 
-                (rpk_nomor, rpk_tanggal, rpk_tpk_nomor, rpk_jumlah, rpk_keterangannama) 
-                VALUES (?, CURDATE(), ?, 1, ?)`,
-                [newRPKNomor, tpk_nomor, candidateName]
-            );
+                const [maxRPK] = await connection.execute(
+                    `SELECT COALESCE(MAX(CAST(LEFT(rpk_nomor, 3) AS UNSIGNED)), 0) AS max_nomor 
+                     FROM triilpermintaankaryawan 
+                     WHERE YEAR(rpk_tanggal) = ? FOR UPDATE`,
+                    [year]
+                );
+
+                const nextNomor   = String(maxRPK[0].max_nomor + 1).padStart(3, '0');
+                const newRPKNomor = `${nextNomor}/HRD/RPK/${month}/${year}`;
+
+                await connection.execute(
+                    `INSERT INTO triilpermintaankaryawan 
+                    (rpk_nomor, rpk_tanggal, rpk_tpk_nomor, rpk_jumlah, rpk_keterangannama) 
+                    VALUES (?, CURDATE(), ?, 1, ?)`,
+                    [newRPKNomor, tpk_nomor, candidateName]
+                );
+            }
+            // Jika sudah ada (trigger sudah insert), kita SKIP untuk mencegah double insert.
 
             // --- Log ---
             await logActivity(connection, {
@@ -1601,29 +1712,56 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             // 🔥 BEDAKAN NO_SHOW vs CANCELLED
             const newStatus = status === 'NO_SHOW' ? 3 : 6;
 
-            await connection.execute(
+            // ================================================================
+            // 🔥 CRITICAL: tgl_tidakditerima DIUPDATE OTOMATIS OLEH TRIGGER
+            // ================================================================
+            // Trigger akan set tgl_tidakditerima = NOW() untuk status 2, 3, 6
+            // Backend HANYA update statusterakhir, biarkan trigger handle timestamp
+            // ================================================================
+            const [updateResult] = await connection.execute(
                 `UPDATE tlistpelamar 
-                SET statusterakhir = ?, tgl_tidakditerima = CURDATE()
-                WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?`,
+                SET statusterakhir = ?
+                WHERE tlp_tpk_nomor = ? 
+                  AND tlp_rkt_nomor = ?
+                  AND statusterakhir = 5`,
                 [newStatus, tpk_nomor, tlp_rkt_nomor]
             );
+
+            if (updateResult.affectedRows === 0) {
+                await connection.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'Kandidat tidak dalam status Approved (5) atau sudah diupdate oleh proses lain.'
+                });
+            }
 
             // ============================================================
             // NO-SHOW → SLA BUFFER + UNLOCK EDIT
             // ============================================================
             if (newStatus === 3) {
 
+                // ================================================================
+                // 🔥 CRITICAL FIX: NO-SHOW GUARD PER TRANSITION
+                // ================================================================
+                // Bug lama: guard mengunci SELAMANYA jika sudah ada 1x no-show
+                // Padahal desain = progressive buffer (1st=+7, 2nd=+5, 3rd+=+3)
+                // 
+                // Fix: Guard hanya untuk KANDIDAT + STATUS TRANSITION yang sama
+                // Kandidat boleh no-show lebih dari sekali di stage berbeda
+                // ================================================================
                 const [alreadyNoShow] = await connection.execute(
                     `SELECT 1
                     FROM t_selection_log
                     WHERE log_tlp_tpk_nomor = ?
                     AND log_tlp_rkt_nomor = ?
                     AND log_action = 'NO_SHOW_TRIGGER'
+                    AND log_status_before = 5
+                    AND log_status_after = 3
                     LIMIT 1`,
                     [tpk_nomor, tlp_rkt_nomor]
                 );
 
-                // 🔒 HARD GUARD — hanya boleh sekali
+                // ✅ Guard per transition: hanya block jika EXACT transition ini sudah tercatat
                 if (alreadyNoShow.length === 0) {
 
                     const bufferDays = await calculateNoShowBuffer(connection, tpk_nomor);
@@ -1655,7 +1793,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 message: status === 'NO_SHOW'
                     ? 'Onboarding gagal karena No-Show — SLA diperpanjang'
                     : 'Onboarding dibatalkan',
-                data: null  // ✅ TAMBAHKAN untuk konsistensi
+                data: {}
             });
         }
 
@@ -1684,7 +1822,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
  */
 router.put('/decision', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor, status_akhir, keterangan_no_show } = req.body;
-    const validStatuses = [0, 2, 3, 4, 5];
+    const validStatuses = [0, 1, 2, 3, 4, 5, 6];  // ✅ SUDAH BENAR
     const connection = await db.getConnection();
 
     if (!tpk_nomor || !tlp_rkt_nomor || !validStatuses.includes(parseInt(status_akhir))) {
@@ -1706,6 +1844,19 @@ router.put('/decision', async (req, res) => {
         }
 
         const oldStatus = currentData[0].statusterakhir;
+        const validTransitions = {
+            0: [1, 2, 3, 4, 5],     // ✅ SUDAH BENAR - BISA LANGSUNG HIRED
+            4: [5, 2],               
+            5: [1, 3, 6],           
+        };
+        
+        if (validTransitions[oldStatus] && !validTransitions[oldStatus].includes(parseInt(status_akhir))) {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message: `Transisi status tidak valid: ${oldStatus} → ${status_akhir}`
+            });
+        }
 
         // 🔒 GUARD: Jika sudah HIRED (1), REJECT (2), atau NO SHOW (3), kunci tombol.
         if ([1, 2, 3].includes(oldStatus)) {
@@ -1713,30 +1864,66 @@ router.put('/decision', async (req, res) => {
             return res.status(400).json({ success: false, message: 'Keputusan sudah final dan tidak dapat diubah.' });
         }
 
-        // 2. Update Status Utama Kandidat
-        await connection.execute(
+        // ✅ PRE-DECISION VALIDATION: Kandidat harus punya evaluasi sebelum diterima/training
+        if ([4, 5].includes(parseInt(status_akhir))) {
+            const [evalCheck] = await connection.execute(
+                `SELECT COUNT(*) as eval_count 
+                 FROM t_evaluasi 
+                 WHERE eval_tlp_tpk_nomor = ? 
+                   AND eval_tlp_rkt_nomor = ?
+                   AND eval_status = 'COMPLETED'`,
+                [tpk_nomor, tlp_rkt_nomor]
+            );
+            
+            if (evalCheck[0].eval_count === 0) {
+                await connection.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: 'Kandidat harus melewati minimal satu evaluasi (TES/INTERVIEW) dengan status COMPLETED sebelum bisa diputuskan diterima atau training.'
+                });
+            }
+        }
+
+        // ================================================================
+        // 2. Update Status Utama Kandidat (WITH IDEMPOTENCY GUARD)
+        // ================================================================
+        const [updateResult] = await connection.execute(
             `UPDATE tlistpelamar SET 
-                statusterakhir = ?, 
-                tgl_tidakditerima = IF(? IN (2,3), CURDATE(), tgl_tidakditerima),
-                tgl_diterima = IF(? = 0, NULL, tgl_diterima)
-             WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?`,
-            [status_akhir, status_akhir, status_akhir, tpk_nomor, tlp_rkt_nomor]
+                statusterakhir = ?
+             WHERE tlp_tpk_nomor = ? 
+               AND tlp_rkt_nomor = ?
+               AND statusterakhir = ?`,
+            [status_akhir, tpk_nomor, tlp_rkt_nomor, oldStatus]
         );
 
-        // 3. LOGIKA OTOMATISASI NO-SHOW (Status 3) & SLA ADJUSTMENT
+        // ✅ Guard: Jika UPDATE tidak mengubah apapun, rollback
+        if (updateResult.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(400).json({
+                success: false,
+                message: 'Status tidak berubah atau sudah diupdate oleh proses lain. Silakan refresh halaman.'
+            });
+        }
+
+        // ================================================================
+        // 3. Initialize Response Data
+        // ================================================================
         let responseData = { 
             success: true, 
             message: 'Keputusan berhasil disimpan.',
             data: null
         };
 
+        // ================================================================
+        // 4. LOGIKA NO-SHOW (Status 3) & SLA ADJUSTMENT
+        // ================================================================
         if (parseInt(status_akhir) === 3) {
-            // Pastikan belum pernah diproses sebagai No-Show agar SLA tidak bengkak berkali-kali
             const [alreadyNoShow] = await connection.execute(
                 `SELECT 1 FROM t_selection_log
-                 WHERE log_tlp_tpk_nomor = ? AND log_tlp_rkt_nomor = ?
-                   AND log_action = 'NO_SHOW_TRIGGER' LIMIT 1`,
-                [tpk_nomor, tlp_rkt_nomor]
+                WHERE log_tlp_tpk_nomor = ? 
+                AND log_action = 'NO_SHOW_TRIGGER' 
+                LIMIT 1 FOR UPDATE`,
+                [tpk_nomor]
             );
 
             if (alreadyNoShow.length === 0) {
@@ -1762,25 +1949,256 @@ router.put('/decision', async (req, res) => {
                     keterangan: `No-Show decision → SLA +${bufferDays} hari`
                 });
 
-                responseData = {
-                    success: true,
-                    message: 'Keputusan berhasil disimpan.',
-                    data: {
-                        sla_adjustment: {
-                            buffer_added: bufferDays,
-                            edit_unlocked: true,
-                            total_noshow: nthNoShow
-                        }
+                responseData.data = {
+                    sla_adjustment: {
+                        buffer_added: bufferDays,
+                        edit_unlocked: true,
+                        total_noshow: nthNoShow
                     }
                 };
             }
         }
 
-        // 4. Catat Audit Log Umum
+        // ================================================================
+        // 5. LOGIKA INSTANT HIRE (Status 1) - TRIGGER-AWARE VERSION
+        // ================================================================
+        if (parseInt(status_akhir) === 1) {
+            // --- Validasi jumlah hired vs target lowongan ---
+            const [hiringStats] = await connection.execute(
+                `SELECT 
+                    tpk.tpk_jumlah AS target,
+                    COUNT(lp.tlp_rkt_nomor) AS total_hired
+                FROM tpermintaankaryawan tpk
+                LEFT JOIN tlistpelamar lp 
+                    ON lp.tlp_tpk_nomor = tpk.tpk_nomor 
+                    AND lp.statusterakhir = 1
+                WHERE tpk.tpk_nomor = ?
+                GROUP BY tpk.tpk_nomor
+                FOR UPDATE`,
+                [tpk_nomor]
+            );
+
+            if (hiringStats.length > 0 && hiringStats[0].total_hired >= hiringStats[0].target) {
+                await connection.rollback();
+                return res.status(400).json({
+                    success: false,
+                    message: `Jumlah hired sudah mencapai target (${hiringStats[0].target}). Tidak bisa menambah karyawan baru.`
+                });
+            }
+
+            // --- Detect source & ambil candidate data ---
+            const isFromApplicant = tlp_rkt_nomor.startsWith('APP-');
+            let candidateData;
+            let candidateName;
+
+            if (isFromApplicant) {
+                const applicant_id = tlp_rkt_nomor.replace('APP-', '');
+                const [applicantRows] = await connection.execute(
+                    'SELECT * FROM t_applicant WHERE applicant_id = ? FOR UPDATE',
+                    [applicant_id]
+                );
+
+                if (applicantRows.length === 0) {
+                    await connection.rollback();
+                    return res.status(404).json({
+                        success: false,
+                        message: 'Data applicant tidak ditemukan'
+                    });
+                }
+
+                candidateData = applicantRows[0];
+                candidateName = candidateData.nama_lengkap;
+
+                // ================================================================
+                // 🔥 CRITICAL FIX: SHADOW RECORD FOR TRIGGER COMPATIBILITY
+                // ================================================================
+                // Problem: Trigger 'tlistpelamar_after_update' mencari nama dari
+                // trekruitmen.rkt_nama, tapi kandidat dari t_applicant tidak ada
+                // di tabel trekruitmen.
+                // 
+                // Solution: Buat shadow record minimal (nomor + nama + status)
+                // agar trigger bisa menemukan nama saat INSERT triilpermintaankaryawan.
+                // INSERT IGNORE = skip jika sudah ada, prevent duplicate key error.
+                // ================================================================
+                await connection.execute(
+                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status) 
+                    VALUES (?, ?, 1)`,
+                    [tlp_rkt_nomor, candidateName]
+                );
+
+            } else {
+                const [rekruitmenRows] = await connection.execute(
+                    'SELECT * FROM trekruitmen WHERE rkt_nomor = ? FOR UPDATE',
+                    [tlp_rkt_nomor]
+                );
+
+                if (rekruitmenRows.length === 0) {
+                    await connection.rollback();
+                    return res.status(404).json({
+                        success: false,
+                        message: 'Data kandidat tidak ditemukan'
+                    });
+                }
+
+                candidateData = rekruitmenRows[0];
+                candidateName = candidateData.rkt_nama;
+            }
+
+            // --- Generate NIK ---
+            const newNIK = await generateNIK(connection);
+
+            // --- Insert ke tkaryawan ---
+            if (isFromApplicant) {
+                await connection.execute(
+                    `INSERT INTO tkaryawan (
+                        kar_nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
+                        kar_alamat, kar_status_kawin, kar_warganegara, kar_agama, kar_gol_darah,
+                        kar_status_tinggal, kar_notelp, kar_noidentitas, kar_email,
+                        kar_jab_kode, kar_bagian, kar_pendidikanterakhir, kar_jurusan,
+                        kar_tgl_masuk, kar_status_aktif, kar_status_kerja, kar_size,
+                        kar_pab_kode, kar_dep_kode, kar_kode_absensi,
+                        kar_golongan, kar_nik_atasan, kar_sistem_gaji, kar_status_bpjs
+                    ) VALUES (
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?,
+                        '', '', ?, ?,
+                        CURDATE(), 1, 1, ?,
+                        '', '', '',
+                        '', '', '', 0
+                    )`,
+                    [
+                        newNIK,
+                        candidateData.nama_lengkap,
+                        candidateData.jenis_kelamin?.toLowerCase().includes('laki') ? 1 : 0,
+                        candidateData.tempat_lahir        || '',
+                        candidateData.tanggal_lahir       || null,
+                        candidateData.alamat_ktp          || '',
+                        candidateData.status_pernikahan   || '',
+                        candidateData.kewarganegaraan     || 'WNI',
+                        candidateData.agama               || '',
+                        candidateData.golongan_darah      || '',
+                        candidateData.status_tinggal      || '',
+                        candidateData.nomor_telepon       || '',
+                        candidateData.nik,
+                        candidateData.email               || '',
+                        candidateData.pendidikan_terakhir || '',
+                        candidateData.jurusan             || '',
+                        candidateData.ukuran_baju         || ''
+                    ]
+                );
+
+                await connection.execute(
+                    'UPDATE t_applicant SET status_applicant = "HIRED", updated_at = NOW() WHERE applicant_id = ?',
+                    [applicant_id]
+                );
+
+            } else {
+                await connection.execute(
+                    `INSERT INTO tkaryawan (
+                        kar_nik, kar_nama, kar_jenkel, kar_tempatlahir, kar_tgllahir,
+                        kar_alamat, kar_status_kawin, kar_warganegara, kar_agama, kar_gol_darah,
+                        kar_status_tinggal, kar_notelp, kar_noidentitas, kar_email, kar_ibukandung,
+                        kar_jab_kode, kar_bagian, kar_pendidikanterakhir, kar_jurusan,
+                        kar_tgl_masuk, kar_status_aktif, kar_status_kerja,
+                        kar_pab_kode, kar_dep_kode, kar_kode_absensi,
+                        kar_golongan, kar_nik_atasan, kar_sistem_gaji, kar_status_bpjs
+                    ) VALUES (
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?,
+                        '', '', ?, ?,
+                        CURDATE(), 1, 1,
+                        '', '', '',
+                        '', '', '', 0
+                    )`,
+                    [
+                        newNIK,
+                        candidateData.rkt_nama,
+                        candidateData.rkt_jenkel,
+                        candidateData.rkt_tempatlahir       || '',
+                        candidateData.rkt_tgllahir          || null,
+                        candidateData.rkt_alamat            || '',
+                        candidateData.rkt_status_kawin      || '',
+                        candidateData.rkt_warganegara       || 'WNI',
+                        candidateData.rkt_agama             || '',
+                        candidateData.rkt_gol_darah         || '',
+                        candidateData.rkt_status_tinggal    || '',
+                        candidateData.rkt_telp              || '',
+                        candidateData.rkt_identitas         || '',
+                        candidateData.rkt_email             || '',
+                        candidateData.rkt_ibukandung        || '',
+                        candidateData.rkt_pendidikanterakhir || '',
+                        candidateData.rkt_jurusan           || ''
+                    ]
+                );
+            }
+
+            // --- Update SLA completion ---
+            await connection.execute(
+                `UPDATE t_recruitment_sla 
+                SET 
+                    sla_completed_at = CASE
+                        WHEN (
+                            SELECT COUNT(*) 
+                            FROM tlistpelamar 
+                            WHERE tlp_tpk_nomor = ?
+                            AND statusterakhir = 1
+                        ) >= (
+                            SELECT tpk_jumlah 
+                            FROM tpermintaankaryawan 
+                            WHERE tpk_nomor = ?
+                        )
+                        THEN NOW()
+                        ELSE sla_completed_at
+                    END,
+                    sla_status = CASE
+                        WHEN (
+                            SELECT COUNT(*) 
+                            FROM tlistpelamar 
+                            WHERE tlp_tpk_nomor = ?
+                            AND statusterakhir = 1
+                        ) >= (
+                            SELECT tpk_jumlah 
+                            FROM tpermintaankaryawan 
+                            WHERE tpk_nomor = ?
+                        )
+                        THEN 'COMPLETED'
+                        ELSE 'ONGOING'
+                    END
+                WHERE sla_tpk_nomor = ?`,
+                [tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor]
+            );
+
+            // ================================================================
+            // ⚠️ CRITICAL: TRIGGER WILL HANDLE triilpermintaankaryawan INSERT
+            // ================================================================
+            // REMOVED: Manual INSERT to triilpermintaankaryawan
+            // 
+            // Reason: Database trigger 'tlistpelamar_after_update' sudah handle
+            // INSERT ke triilpermintaankaryawan saat statusterakhir = 1.
+            // Kita sudah prepare shadow record di trekruitmen (untuk t_applicant)
+            // sehingga trigger bisa menemukan nama kandidat.
+            // 
+            // Jika tetap di-INSERT manual → ERROR: Duplicate Entry
+            // ================================================================
+
+            // --- Update response message ---
+            responseData.message = `Berhasil! Kandidat langsung menjadi karyawan dengan NIK: ${newNIK}`;
+            responseData.data = { new_nik: newNIK };
+        }
+
+        // ================================================================
+        // 6. Catat Audit Log Umum (SATU KALI SAJA)
+        // ================================================================
         await logActivity(connection, {
-            tpk_nomor, tlp_rkt_nomor, action: 'DECISION',
-            status_before: oldStatus, status_after: status_akhir,
-            user_kode: req.user?.user_kode, keterangan: keterangan_no_show || 'Update status rekrutmen'
+            tpk_nomor, 
+            tlp_rkt_nomor, 
+            action: 'DECISION',
+            status_before: oldStatus, 
+            status_after: status_akhir,
+            user_kode: req.user?.user_kode, 
+            keterangan: keterangan_no_show || 'Update status rekrutmen'
         });
 
         await connection.commit();
@@ -1789,7 +2207,7 @@ router.put('/decision', async (req, res) => {
     } catch (error) {
         await connection.rollback();
         console.error('❌ Error decision:', error.message);
-        res.status(500).json({ success: false, error: error.message });
+        res.status(500).json({ success: false, message: 'Gagal memproses keputusan', error: error.message });
     } finally {
         connection.release();
     }
@@ -1903,7 +2321,7 @@ router.delete('/remove', async (req, res) => {
         res.json({
             success: true,
             message: 'Kandidat berhasil dihapus dari shortlist',
-            data: null  // ✅ TAMBAHKAN untuk konsistensi
+            data: {}
         });
 
     } catch (error) {

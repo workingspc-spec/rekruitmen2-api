@@ -92,7 +92,15 @@ router.get('/stats', authenticate, async (req, res) => {
 
         // 5. APPROVAL STATUS
         let pendingApproval = 0;
-        if (!is_hrd) {
+        if (is_hrd) {
+            // Hitung permintaan yang sudah di-approve atasan tapi belum di-approve HRD
+            const [hrdApprovals] = await db.execute(`
+                SELECT COUNT(*) as total FROM tpermintaankaryawan 
+                WHERE tpk_approveatasan = 1 AND tpk_approveHRD = 0
+            `);
+            pendingApproval = hrdApprovals[0].total;
+        } else {
+            // Logika Manager (Nik Atasan)
             const approvalFilter = getDateFilter(period, 'tpk_tanggal');
             const [approvals] = await db.execute(`
                 SELECT COUNT(*) as total FROM tpermintaankaryawan p
@@ -110,12 +118,16 @@ router.get('/stats', authenticate, async (req, res) => {
 
         if (is_hrd) {
             // A. Shortlist Progress
+            // ✅ FIX BUG 3: Filter hired dan no-show berdasarkan statusterakhir
             const [shortlist] = await db.execute(`
                 SELECT 
                     COUNT(*) as total_shortlist,
                     SUM(CASE WHEN tlp_status = 1 THEN 1 ELSE 0 END) as verified,
                     SUM(CASE WHEN statusterakhir = 0 THEN 1 ELSE 0 END) as pending_decision,
-                    SUM(CASE WHEN statusterakhir = 1 THEN 1 ELSE 0 END) as hired
+                    SUM(CASE WHEN statusterakhir = 1 THEN 1 ELSE 0 END) as hired,
+                    SUM(CASE WHEN statusterakhir = 3 THEN 1 ELSE 0 END) as no_show,
+                    SUM(CASE WHEN statusterakhir = 4 THEN 1 ELSE 0 END) as training,
+                    SUM(CASE WHEN statusterakhir = 5 THEN 1 ELSE 0 END) as pending_onboarding
                 FROM tlistpelamar
             `);
             shortlistStats = shortlist[0];
@@ -177,7 +189,15 @@ router.get('/stats', authenticate, async (req, res) => {
                 
                 // Stats khusus HRD
                 ...(is_hrd && {
-                    shortlist: shortlistStats,
+                    shortlist: {
+                        total: shortlistStats.total_shortlist,
+                        verified: shortlistStats.verified,
+                        pending_decision: shortlistStats.pending_decision,
+                        hired: shortlistStats.hired,
+                        no_show: shortlistStats.no_show,  // ✅ TAMBAHKAN
+                        training: shortlistStats.training,  // ✅ TAMBAHKAN
+                        pending_onboarding: shortlistStats.pending_onboarding  // ✅ TAMBAHKAN
+                    },
                     evaluasi: evaluasiStats,
                     pelatihan: pelatihanStats,
                     onboarding: onboardingStats

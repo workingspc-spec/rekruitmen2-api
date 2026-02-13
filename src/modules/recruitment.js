@@ -3,7 +3,7 @@ const express = require('express');
 const db = require('../config/db');
 const router = express.Router();
 const { authenticate, isHRD, isManager } = require('../middleware/authMiddleware');
-const { addWorkdays, countWorkdays } = require('../utils/workdayCalculator');
+const { addWorkdays, countWorkdays, formatDateSafe } = require('../utils/workdayCalculator');
 
 /**
  * =====================================================================
@@ -37,8 +37,8 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh) {
         const [y, m, d] = tgl_butuh.split('-').map(Number);
         const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
 
-        // 2. FIX: Cara ambil string tanggal yang aman dari bias timezone
-        const minDateStr = `${minDateObj.getFullYear()}-${String(minDateObj.getMonth() + 1).padStart(2, '0')}-${String(minDateObj.getDate()).padStart(2, '0')}`;
+        // 2. ✅ FIX: Gunakan formatDateSafe alih-alih manual formatting
+        const minDateStr = formatDateSafe(minDateObj);
 
         if (requestedDate < minDateObj) {
             return {
@@ -99,8 +99,12 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
  */
 router.get('/my-requests', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
+    const is_hrd = req.user.user_hrd; // Ambil status HRD dari token
 
     try {
+        // Jika HRD, ambil semua. Jika bukan, ambil milik sendiri.
+        const whereClause = is_hrd ? '1=1' : 'p.tpk_peminta = ?';
+        const params = is_hrd ? [] : [user_kode];
         const query = `
             SELECT 
                 p.tpk_nomor, 
@@ -126,11 +130,11 @@ router.get('/my-requests', authenticate, async (req, res) => {
             FROM tpermintaankaryawan p
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            WHERE p.tpk_peminta = ?
+            WHERE ${whereClause} 
             ORDER BY p.tpk_tanggal DESC
         `;
 
-        const [rows] = await db.execute(query, [user_kode]);
+        const [rows] = await db.execute(query, params);
         res.json({ success: true, data: rows });
 
     } catch (error) {
@@ -159,7 +163,39 @@ router.get('/detail', authenticate, async (req, res) => {
     try {
         const [rows] = await db.execute(
             `SELECT 
-                t.*, 
+                t.tpk_nomor,
+                t.tpk_peminta,
+                DATE_FORMAT(t.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
+                t.tpk_jab_kode,
+                t.tpk_bagian,
+                DATE_FORMAT(t.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
+                t.tpk_jumlah,
+                t.tpk_alasan,
+                t.tpk_alasanlain,
+                t.tpk_keterangan,
+                t.tpk_keterangan2,
+                t.tpk_keterangan3,
+                t.tpk_keterangan4,
+                t.tpk_keterangan5,
+                t.tpk_keterangan6,
+                t.tpk_keterangan7,
+                t.tpk_keterangan8,
+                t.tpk_keterangan9,
+                t.tpk_keterangan10,
+                t.tpk_spesifikasi,
+                t.tpk_spesifikasi2,
+                t.tpk_spesifikasi3,
+                t.tpk_spesifikasi4,
+                t.tpk_spesifikasi5,
+                t.tpk_spesifikasi6,
+                t.tpk_spesifikasi7,
+                t.tpk_spesifikasi8,
+                t.tpk_spesifikasi9,
+                t.tpk_spesifikasi10,
+                t.tpk_approveatasan,
+                DATE_FORMAT(t.tpk_tgl_approveatasan, '%Y-%m-%d') as tpk_tgl_approveatasan,
+                t.tpk_approveHRD,
+                DATE_FORMAT(t.tpk_tgl_approveHRD, '%Y-%m-%d') as tpk_tgl_approveHRD,
                 j.jab_nama, 
                 j.jab_kode,
                 sla.sla_original_requested_date,
@@ -373,20 +409,22 @@ router.post('/save', authenticate, async (req, res) => {
         } else {
             // ========== INSERT LOGIC ==========
             const missingFields = [];
-            if (!jab_kode) missingFields.push('jab_kode');
+
+            if (!jab_kode) missingFields.push('jabatan');
             if (!bagian) missingFields.push('bagian');
             if (!tgl_butuh) missingFields.push('tgl_butuh');
             if (!jumlah || jumlah <= 0) missingFields.push('jumlah');
+            if (!alasan || alasan.trim() === '') missingFields.push('alasan');
 
             if (missingFields.length > 0) {
                 connection.release();
-                return res.status(400).json({ 
+                return res.status(400).json({
                     success: false,
-                    message: `Data tidak lengkap. Field yang diperlukan: ${missingFields.join(', ')}`,
+                    message: 'Data wajib belum lengkap',
                     missing_fields: missingFields
                 });
             }
-            
+
             await connection.beginTransaction();
 
             // ✅ FIX #1: Validasi DI DALAM transaksi
@@ -518,6 +556,7 @@ router.post('/save', authenticate, async (req, res) => {
 
 /**
  * GET /api/recruitment/approval/atasan
+ * ✅ UPDATED: Menggunakan nilai stabil dari enum ("pending", "approved")
  */
 router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
     const { status } = req.query;
@@ -545,13 +584,15 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
 
         const params = [user_kode];
 
-        if (status === 'Belum Approve') {
+        // ✅ GUNAKAN NILAI STABIL, BUKAN TEKS UI
+        if (status === 'pending') {
             query += ' AND p.tpk_approveatasan = 0';
-        } else if (status === 'Sudah Approve') {
+        } else if (status === 'approved') {
             query += ' AND p.tpk_approveatasan = 1';
-        } else if (status === 'Rejected') {
+        } else if (status === 'rejected') {
             query += ' AND p.tpk_approveatasan = 2';
         }
+        // else: status null atau 'all' -> tidak ada filter tambahan
 
         query += ' ORDER BY p.tpk_tanggal DESC';
 
@@ -696,7 +737,13 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             // Hitung selisih user vs system
             const diffDays = countWorkdays(requestedDate, finalTargetDate);
 
-            // UPDATE t_recruitment_sla
+            // ✅ APPROVAL DELAY AUDIT TRAIL
+            const approvalNote =
+                approvalDelayDays > 0
+                    ? `Approval atasan terlambat ${approvalDelayDays} hari kerja.`
+                    : `Approval atasan tepat waktu.`;
+
+            // ✅ UPDATE t_recruitment_sla dengan TIMEZONE-SAFE FORMATTING
             await connection.execute(
                 `UPDATE t_recruitment_sla 
                 SET sla_approved_at = NOW(),
@@ -710,18 +757,23 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                     sla_source = ?,
                     sla_approval_delay_days = ?,
                     sla_user_vs_system_diff_days = ?,
+                    sla_notes = CONCAT(
+                        COALESCE(sla_notes,''), 
+                        '\n[', NOW(), '] ', ?
+                    ),
                     sla_status = 'CALCULATED'
                 WHERE sla_tpk_nomor = ?`,
                 [
                     master.jlt_min_days,
                     master.jlt_max_days,
                     master.jlt_is_flexible,
-                    systemFloorDate ? systemFloorDate.toISOString().split('T')[0] : null,
-                    finalTargetDate.toISOString().split('T')[0],
-                    requestedDate.toISOString().split('T')[0],
+                    formatDateSafe(systemFloorDate),
+                    formatDateSafe(finalTargetDate),
+                    formatDateSafe(requestedDate),
                     slaSource,
                     approvalDelayDays,
                     diffDays,
+                    approvalNote,
                     tpk_nomor
                 ]
             );
@@ -732,17 +784,19 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             return res.json({ 
                 success: true, 
                 message: 'Berhasil APPROVE Permintaan',
-                sla_info: {
-                    original_requested_date: data.sla_original_requested_date,
-                    system_floor_date: systemFloorDate ? systemFloorDate.toISOString().split('T')[0] : null,
-                    final_target_date: finalTargetDate.toISOString().split('T')[0],
-                    sla_source: slaSource,
-                    approval_delay_days: approvalDelayDays,
-                    explanation: slaSource === 'SYSTEM' 
-                        ? `Tanggal user tidak realistis. HRD butuh minimal ${master.jlt_min_days} hari kerja.`
-                        : slaSource === 'FLEXIBLE'
-                        ? 'Jabatan fleksibel. HRD akan bekerja sesuai kebutuhan.'
-                        : 'Tanggal user sudah realistis. HRD akan bekerja sesuai target.'
+                data: {
+                    sla_info: {
+                        original_requested_date: formatDateSafe(requestedDate),
+                        system_floor_date: formatDateSafe(systemFloorDate),
+                        final_target_date: formatDateSafe(finalTargetDate),
+                        sla_source: slaSource,
+                        approval_delay_days: approvalDelayDays,
+                        explanation: slaSource === 'SYSTEM' 
+                            ? `Tanggal user tidak realistis. HRD butuh minimal ${master.jlt_min_days} hari kerja.`
+                            : slaSource === 'FLEXIBLE'
+                            ? 'Jabatan fleksibel. HRD akan bekerja sesuai kebutuhan.'
+                            : 'Tanggal user sudah realistis. HRD akan bekerja sesuai target.'
+                    }
                 }
             });
 
@@ -759,9 +813,9 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             return res.json({ 
                 success: true, 
                 message: 'Berhasil REJECT Permintaan',
-                data: {  // ✅ Tambahkan wrapper data
+                data: {
                     message: 'Permintaan berhasil ditolak',
-                    sla_info: null  // ✅ Null karena REJECT tidak ada SLA
+                    sla_info: null
                 }
             });
         }
@@ -776,6 +830,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
 /**
  * GET /api/recruitment/approval/hrd
+ * ✅ UPDATED: Menggunakan nilai stabil dari enum ("pending", "approved")
  */
 router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
     const { status } = req.query;
@@ -803,11 +858,13 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             WHERE p.tpk_approveatasan = 1
         `;
 
-        if (status === 'Belum Approve') {
+        // ✅ GUNAKAN NILAI STABIL, BUKAN TEKS UI
+        if (status === 'pending') {
             query += ' AND p.tpk_approveHRD = 0';
-        } else if (status === 'Sudah Approve') {
+        } else if (status === 'approved') {
             query += ' AND p.tpk_approveHRD = 1';
         }
+        // else: status null atau 'all' -> tidak ada filter tambahan
 
         query += ' ORDER BY p.tpk_tanggal DESC';
 

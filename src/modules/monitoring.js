@@ -62,6 +62,10 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 sla.sla_is_editable,
                 sla.sla_source,
                 sla.sla_notes,
+                sla.sla_approval_delay_days,
+                
+                -- ✅ PRIORITY 2: TAMBAHKAN APPROVER NAME
+                approver.kar_nama AS approver_name,
                 
                 -- Time Calculation
                 DATEDIFF(sla.sla_final_target_date, CURDATE()) as days_remaining,
@@ -74,6 +78,12 @@ router.get('/sla-status', authenticate, async (req, res) => {
                     WHEN DATEDIFF(sla.sla_final_target_date, CURDATE()) <= 7 THEN 'WARNING'
                     ELSE 'ON_PROGRESS'
                 END as ui_status_tag,
+                
+                -- ✅ Approval Flag untuk UI
+                CASE
+                    WHEN sla.sla_approval_delay_days > 5 THEN 'APPROVAL_DELAYED'
+                    ELSE NULL
+                END AS approval_flag,
                 
                 -- Progress Tracking
                 (SELECT COUNT(*) 
@@ -107,10 +117,11 @@ router.get('/sla-status', authenticate, async (req, res) => {
             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
+            LEFT JOIN tkaryawan approver ON approver.kar_nik = k.kar_nik_atasan  -- ✅ TAMBAH JOIN
             ${whereClause}
             ORDER BY 
                 CASE 
-                    WHEN sla.sla_is_editable = 1 THEN 0  -- Prioritas tertinggi
+                    WHEN sla.sla_is_editable = 1 THEN 0
                     WHEN CURDATE() > sla.sla_final_target_date THEN 1
                     ELSE 2
                 END ASC,
@@ -172,6 +183,16 @@ router.get('/sla-status', authenticate, async (req, res) => {
  * Menampilkan timeline, No-Show events, dan adjustment history
  * =====================================================================
  */
+// src/modules/monitoring.js
+
+/**
+ * GET /api/monitoring/sla-detail/:tpk_nomor
+ * =====================================================================
+ * Detail SLA untuk satu permintaan tertentu
+ * Menampilkan timeline, No-Show events, dan adjustment history
+ * ✅ UPDATED: Tambahkan approval info
+ * =====================================================================
+ */
 router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
     const { tpk_nomor } = req.params;
     const { user_kode, user_hrd } = req.user;
@@ -206,12 +227,23 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                 j.jab_nama,
                 p.tpk_jumlah,
                 p.tpk_bagian,
+                p.tpk_peminta,
                 k.kar_nama AS nama_peminta,
-                DATEDIFF(sla.sla_final_target_date, CURDATE()) AS days_remaining
+                DATEDIFF(sla.sla_final_target_date, CURDATE()) AS days_remaining,
+                
+                -- ✅ TAMBAHKAN APPROVAL INFO
+                sla.sla_approval_delay_days,
+                approver.kar_nama AS approver_name,
+                CASE
+                    WHEN sla.sla_approval_delay_days > 5 THEN 'APPROVAL_DELAYED'
+                    ELSE NULL
+                END AS approval_flag
+                
              FROM t_recruitment_sla sla
              JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
              JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
+             LEFT JOIN tkaryawan approver ON approver.kar_nik = k.kar_nik_atasan  -- ✅ JOIN APPROVER
              WHERE sla.sla_tpk_nomor = ?`,
             [tpk_nomor]
         );
@@ -256,7 +288,14 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                     buffer_days_added: sla.sla_no_show_buffer_days,
                     days_remaining: sla.days_remaining
                 },
-                no_show_history: noShowHistory
+                no_show_history: noShowHistory,
+                
+                // ✅ TAMBAHKAN APPROVAL INFO di root level
+                approval_info: {
+                    approver_name: sla.approver_name,
+                    approval_delay_days: sla.sla_approval_delay_days,
+                    approval_flag: sla.approval_flag
+                }
             }
         });
 
@@ -474,6 +513,154 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Gagal mengambil KPI HRD',
+            error: error.message
+        });
+    }
+});
+
+/**
+ * GET /api/monitoring/kpi-approver
+ * =====================================================================
+ * KPI Dashboard untuk Atasan/Manager
+ * Menampilkan performa approval atasan (apakah cepat atau lambat approve)
+ * =====================================================================
+ */
+// ✅ PERBAIKAN: Hapus middleware 'isHRD' agar user non-HRD (Manager) bisa mengakses
+router.get('/kpi-approver', authenticate, async (req, res) => {
+    const { period } = req.query; // 'month', 'quarter', 'year'
+    const user = req.user; // Diambil dari middleware authenticate (user_kode, is_hrd)
+
+    try {
+        // 1. Build date filter (Logika Periode Waktu)
+        let dateFilter = '';
+        if (period === 'month') {
+            dateFilter = 'AND YEAR(sla.sla_approved_at) = YEAR(CURDATE()) AND MONTH(sla.sla_approved_at) = MONTH(CURDATE())';
+        } else if (period === 'quarter') {
+            dateFilter = 'AND YEAR(sla.sla_approved_at) = YEAR(CURDATE()) AND QUARTER(sla.sla_approved_at) = QUARTER(CURDATE())';
+        } else if (period === 'year') {
+            dateFilter = 'AND YEAR(sla.sla_approved_at) = YEAR(CURDATE())';
+        }
+
+        // 2. ✅ LOGIKA ROLE FILTER
+        // Jika bukan HRD (user_hrd === 0), filter data agar hanya menampilkan record di mana user login adalah approver-nya.
+        let roleFilter = '';
+        if (user.user_hrd !== 1) {
+            roleFilter = `AND approver.kar_nik = '${user.user_kode}'`;
+        }
+
+        // ===== QUERY 1: Detail Records =====
+        const sql = `
+            SELECT
+                p.tpk_nomor,
+                DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') AS request_date,
+                DATE_FORMAT(sla.sla_approved_at, '%Y-%m-%d') AS approved_date,
+
+                -- Approver info
+                approver.kar_nik AS approver_nik,
+                COALESCE(approver.kar_nama, 'TANPA ATASAN') AS approver_name,
+
+                -- Requester info
+                peminta.kar_nama AS requester_name,
+                p.tpk_bagian,
+                j.jab_nama,
+
+                -- KPI Metric
+                DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) AS sla_approval_delay_days,
+
+                CASE
+                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 1 THEN 'EXCELLENT'
+                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 3 THEN 'GOOD'
+                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 5 THEN 'SLOW'
+                    ELSE 'VERY_SLOW'
+                END AS approval_performance
+
+            FROM t_recruitment_sla sla
+            JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
+            JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
+            LEFT JOIN tkaryawan peminta ON peminta.kar_nik = p.tpk_peminta
+            LEFT JOIN tkaryawan approver ON approver.kar_nik = peminta.kar_nik_atasan
+
+            WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
+              AND sla.sla_approved_at IS NOT NULL
+              ${dateFilter}
+              ${roleFilter} -- ✅ Masukkan filter role di sini
+            ORDER BY sla_approval_delay_days DESC
+        `;
+
+        const [rows] = await db.execute(sql);
+
+        // ===== QUERY 2: Summary Per Approver =====
+        const approverSql = `
+            SELECT
+                approver.kar_nik AS approver_nik,
+                COALESCE(approver.kar_nama, 'TANPA ATASAN') AS approver_name,
+                COUNT(*) AS total_approvals,
+                ROUND(AVG(DATEDIFF(sla.sla_approved_at, p.tpk_tanggal)), 1) AS avg_delay_days,
+                
+                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 1 THEN 1 ELSE 0 END) AS excellent_count,
+                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 3 THEN 1 ELSE 0 END) AS good_count,
+                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 5 THEN 1 ELSE 0 END) AS slow_count,
+                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) > 5 THEN 1 ELSE 0 END) AS very_slow_count
+
+            FROM t_recruitment_sla sla
+            JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
+            LEFT JOIN tkaryawan peminta ON peminta.kar_nik = p.tpk_peminta
+            LEFT JOIN tkaryawan approver ON approver.kar_nik = peminta.kar_nik_atasan
+
+            WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
+              AND sla.sla_approved_at IS NOT NULL
+              ${dateFilter}
+              ${roleFilter} -- ✅ Masukkan filter role juga di sini
+            
+            GROUP BY approver.kar_nik, approver.kar_nama
+            HAVING total_approvals > 0
+            ORDER BY avg_delay_days ASC
+        `;
+
+        const [approverStats] = await db.execute(approverSql);
+
+        // Perhitungan Summary Akhir (Sesuai ekspektasi Frontend)
+        const totalRecords = rows.length;
+        const excellentCount = rows.filter(r => r.approval_performance === 'EXCELLENT').length;
+        const goodCount = rows.filter(r => r.approval_performance === 'GOOD').length;
+        const slowCount = rows.filter(r => r.approval_performance === 'SLOW').length;
+        const verySlowCount = rows.filter(r => r.approval_performance === 'VERY_SLOW').length;
+
+        const avgApprovalDelay = totalRecords > 0
+            ? rows.reduce((sum, r) => sum + r.sla_approval_delay_days, 0) / totalRecords
+            : 0;
+
+        res.json({
+            success: true,
+            data: rows,
+            approver_stats: approverStats,
+            summary: {
+                period: period || 'all_time',
+                total_approvals: totalRecords,
+                avg_approval_delay_days: Math.round(avgApprovalDelay * 10) / 10,
+                performance_distribution: {
+                    excellent: excellentCount,
+                    good: goodCount,
+                    slow: slowCount,
+                    very_slow: verySlowCount
+                },
+                fast_approval_rate: totalRecords > 0
+                    ? Math.round(((excellentCount + goodCount) / totalRecords) * 100)
+                    : 0
+            },
+            insights: {
+                note: 'KPI ini mengukur kecepatan atasan dalam approve permintaan karyawan',
+                target: 'Target ideal: approval dalam ≤3 hari kerja',
+                fastest_approver: approverStats.length > 0 ? approverStats[0].approver_name : 'N/A',
+                slowest_approver: approverStats.length > 0 ? approverStats[approverStats.length - 1].approver_name : 'N/A'
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Error KPI Approver:', error.message);
+        res.status(500).json({
+            success: false,
+            message: 'Gagal mengambil KPI Approver',
             error: error.message
         });
     }

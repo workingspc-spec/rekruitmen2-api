@@ -17,16 +17,22 @@ const pool = mysql.createPool({
     connectionLimit: 10,
     queueLimit: 0,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 0
+    keepAliveInitialDelay: 0,
+    timezone: '+07:00',  // ✅ CRITICAL: Set timezone ke WIB
+    dateStrings: true    // ✅ PENTING: Kembalikan DATE/DATETIME sebagai string
 });
 
 const db = pool.promise();
 
-// Test koneksi awal (SAFE)
+// Test koneksi awal dengan explicit timezone setting
 (async () => {
     try {
         const conn = await db.getConnection();
         console.log(`✅ Database connected: ${process.env.DB_NAME}`);
+        
+        // ✅ Set timezone untuk setiap connection
+        await conn.execute("SET time_zone = '+07:00'");
+        
         conn.release();
     } catch (err) {
         console.error('❌ Database connection failed!');
