@@ -442,14 +442,16 @@ router.get('/candidates', async (req, res) => {
             data: rows,
             count: rows.length,
             summary: {
-                total:               rows.length,
-                from_applicant:      rows.filter(r => r.source_type === 'applicant').length,
-                from_rekruitmen:     rows.filter(r => r.source_type === 'rekruitmen').length,
-                verified:            rows.filter(r => r.tlp_status === 1).length,
-                decided:             rows.filter(r => r.statusterakhir !== 0).length,
-                hired:               rows.filter(r => r.statusterakhir === 1).length,
-                training:            rows.filter(r => r.statusterakhir === 4).length,
-                pending_onboarding:  rows.filter(r => r.statusterakhir === 5).length
+                total: rows.length,
+                from_applicant: rows.filter(r => r.source_type === 'applicant').length,
+                from_rekruitmen: rows.filter(r => r.source_type === 'rekruitmen').length,
+                verified: rows.filter(r => r.tlp_status === 1).length,
+                decided: rows.filter(r => r.statusterakhir !== 0).length,
+                // TAMBAHKAN DUA BARIS INI:
+                hired: rows.filter(r => r.statusterakhir === 1).length,
+                tidak_datang: rows.filter(r => r.statusterakhir === 3).length, 
+                training: rows.filter(r => r.statusterakhir === 4).length,
+                pending_onboarding: rows.filter(r => r.statusterakhir === 5).length
             }
         });
 
@@ -1304,18 +1306,20 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             }
 
             // --- Validasi jumlah hired vs target lowongan ---
+            // ✅ FIX: EXCLUDE kandidat yang sedang diproses saat ini
             const [hiringStats] = await connection.execute(
                 `SELECT 
                     tpk.tpk_jumlah AS target,
                     COUNT(lp.tlp_rkt_nomor) AS total_hired
-                 FROM tpermintaankaryawan tpk
-                 LEFT JOIN tlistpelamar lp 
-                     ON lp.tlp_tpk_nomor = tpk.tpk_nomor 
+                FROM tpermintaankaryawan tpk
+                LEFT JOIN tlistpelamar lp 
+                    ON lp.tlp_tpk_nomor = tpk.tpk_nomor 
                     AND lp.statusterakhir = 1
-                 WHERE tpk.tpk_nomor = ?
-                 GROUP BY tpk.tpk_nomor
-                 FOR UPDATE`,
-                [tpk_nomor]
+                    AND lp.tlp_rkt_nomor != ?  -- ⚠️ PENTING: Exclude kandidat ini
+                WHERE tpk.tpk_nomor = ?
+                GROUP BY tpk.tpk_nomor
+                FOR UPDATE`,
+                [tlp_rkt_nomor, tpk_nomor]  // ⚠️ Tambah parameter pertama
             );
 
             if (hiringStats.length > 0 && hiringStats[0].total_hired >= hiringStats[0].target) {
@@ -1846,6 +1850,7 @@ router.put('/decision', async (req, res) => {
         // ================================================================
         if (parseInt(status_akhir) === 1) {
             // --- Validasi jumlah hired vs target lowongan ---
+            // ✅ FIX: EXCLUDE kandidat yang sedang diproses saat ini
             const [hiringStats] = await connection.execute(
                 `SELECT 
                     tpk.tpk_jumlah AS target,
@@ -1854,10 +1859,11 @@ router.put('/decision', async (req, res) => {
                 LEFT JOIN tlistpelamar lp 
                     ON lp.tlp_tpk_nomor = tpk.tpk_nomor 
                     AND lp.statusterakhir = 1
+                    AND lp.tlp_rkt_nomor != ?  -- ⚠️ PENTING: Exclude kandidat ini
                 WHERE tpk.tpk_nomor = ?
                 GROUP BY tpk.tpk_nomor
                 FOR UPDATE`,
-                [tpk_nomor]
+                [tlp_rkt_nomor, tpk_nomor]  // ⚠️ Tambah parameter pertama
             );
 
             if (hiringStats.length > 0 && hiringStats[0].total_hired >= hiringStats[0].target) {
@@ -2124,9 +2130,28 @@ router.get('/summary/:tpk_nomor', async (req, res) => {
             [tpk_nomor]
         );
 
+        // ✅ CRITICAL FIX: Ensure all values are integers
+        const rawData = rows[0];
+
         res.json({
             success: true,
-            data: rows[0]
+            data: {
+                total_pelamar: Number(rawData.total_pelamar || 0),
+                dari_applicant: Number(rawData.dari_applicant || 0),
+                dari_rekruitmen: Number(rawData.dari_rekruitmen || 0),
+                terverifikasi: Number(rawData.terverifikasi || 0),
+                belum_verifikasi: Number(rawData.belum_verifikasi || 0),
+                sudah_tes: Number(rawData.sudah_tes || 0),
+                sudah_interview_user: Number(rawData.sudah_interview_user || 0),
+                sudah_interview_hrd: Number(rawData.sudah_interview_hrd || 0),
+                belum_diputuskan: Number(rawData.belum_diputuskan || 0),
+                hired: Number(rawData.hired || 0), // Pastikan Number
+                ditolak: Number(rawData.ditolak || 0),
+                tidak_datang: Number(rawData.tidak_datang || 0), // Pastikan Number
+                pelatihan: Number(rawData.pelatihan || 0),
+                approved_pending_onboarding: Number(rawData.approved_pending_onboarding || 0),
+                failed_onboarding: Number(rawData.failed_onboarding || 0)
+            }
         });
 
     } catch (error) {

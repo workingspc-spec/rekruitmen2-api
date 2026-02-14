@@ -672,6 +672,7 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
  * =====================================================================
  * Summary dashboard untuk semua role
  * Memberikan overview high-level dari sistem rekrutmen
+ * ✅ FIXED: Proper NULL handling & date filtering
  * =====================================================================
  */
 router.get('/dashboard-summary', authenticate, async (req, res) => {
@@ -697,7 +698,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
              JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause}
-             AND sla.sla_status = 'CALCULATED'`,
+             ${whereClause ? 'AND' : 'WHERE'} sla.sla_status = 'CALCULATED'`,
             params
         );
 
@@ -708,7 +709,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
              JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause}
-             AND sla.sla_status = 'CALCULATED'
+             ${whereClause ? 'AND' : 'WHERE'} sla.sla_status = 'CALCULATED'
              AND CURDATE() > sla.sla_final_target_date`,
             params
         );
@@ -720,32 +721,34 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
              JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause}
-             AND sla.sla_status = 'CALCULATED'
+             ${whereClause ? 'AND' : 'WHERE'} sla.sla_status = 'CALCULATED'
              AND sla.sla_is_editable = 1`,
             params
         );
 
-        // Total Hired (completed this month)
+        // ✅ FIXED: Total Hired (completed this month) - WITH NULL CHECK
         const [totalHired] = await db.execute(
             `SELECT COUNT(DISTINCT lp.tlp_rkt_nomor) as count
              FROM tlistpelamar lp
              JOIN tpermintaankaryawan p ON p.tpk_nomor = lp.tlp_tpk_nomor
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
              ${whereClause}
-             AND lp.statusterakhir = 1
+             ${whereClause ? 'AND' : 'WHERE'} lp.statusterakhir = 1
+             AND lp.tgl_diterima IS NOT NULL
              AND YEAR(lp.tgl_diterima) = YEAR(CURDATE())
              AND MONTH(lp.tgl_diterima) = MONTH(CURDATE())`,
             params
         );
 
-        // Total No-Shows (this month)
+        // ✅ FIXED: Total No-Shows (this month) - WITH NULL CHECK
         const [totalNoShows] = await db.execute(
             `SELECT COUNT(*) as count
              FROM tlistpelamar lp
              JOIN tpermintaankaryawan p ON p.tpk_nomor = lp.tlp_tpk_nomor
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
              ${whereClause}
-             AND lp.statusterakhir = 3
+             ${whereClause ? 'AND' : 'WHERE'} lp.statusterakhir = 3
+             AND lp.tgl_tidakditerima IS NOT NULL
              AND YEAR(lp.tgl_tidakditerima) = YEAR(CURDATE())
              AND MONTH(lp.tgl_tidakditerima) = MONTH(CURDATE())`,
             params
@@ -754,11 +757,11 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
         res.json({
             success: true,
             data: {
-                active_requests: activeRequests[0].count,
-                overdue_requests: overdueRequests[0].count,
-                need_user_update: needUpdate[0].count,
-                hired_this_month: totalHired[0].count,
-                no_shows_this_month: totalNoShows[0].count
+                activeRequests: activeRequests[0].count,
+                overdueRequests: overdueRequests[0].count,
+                needUserUpdate: needUpdate[0].count,
+                hiredThisMonth: totalHired[0].count,
+                noShowsThisMonth: totalNoShows[0].count
             },
             period: {
                 year: new Date().getFullYear(),

@@ -705,7 +705,10 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
             const master = masterData[0];
             const approvedAt = new Date();
+            approvedAt.setHours(0, 0, 0, 0); // 💡 Normalisasi: Set ke jam 00:00
+
             const requestedDate = new Date(data.sla_original_requested_date);
+            requestedDate.setHours(0, 0, 0, 0); // 💡 Normalisasi: Set ke jam 00:00
             const createdAt = new Date(data.sla_request_created_at);
 
             let systemFloorDate = null;
@@ -721,7 +724,8 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             } else {
                 systemFloorDate = addWorkdays(approvedAt, master.jlt_min_days);
                 
-                if (systemFloorDate > requestedDate) {
+                if (systemFloorDate.getTime() > requestedDate.getTime()) { 
+                    // Gunakan .getTime() untuk perbandingan yang lebih solid
                     finalTargetDate = systemFloorDate;
                     slaSource = 'SYSTEM';
                 } else {

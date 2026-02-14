@@ -118,7 +118,6 @@ router.get('/stats', authenticate, async (req, res) => {
 
         if (is_hrd) {
             // A. Shortlist Progress
-            // ✅ FIX BUG 3: Filter hired dan no-show berdasarkan statusterakhir
             const [shortlist] = await db.execute(`
                 SELECT 
                     COUNT(*) as total_shortlist,
@@ -132,7 +131,7 @@ router.get('/stats', authenticate, async (req, res) => {
             `);
             shortlistStats = shortlist[0];
 
-            // B. Stats Evaluasi (NEW)
+            // B. Stats Evaluasi
             const [evaluasi] = await db.execute(`
                 SELECT 
                     COUNT(*) as total_evaluasi,
@@ -145,7 +144,7 @@ router.get('/stats', authenticate, async (req, res) => {
             `);
             evaluasiStats = evaluasi[0];
 
-            // C. Stats Pelatihan (NEW)
+            // C. Stats Pelatihan
             const [pelatihan] = await db.execute(`
                 SELECT 
                     COUNT(*) as total_pelatihan,
@@ -156,7 +155,7 @@ router.get('/stats', authenticate, async (req, res) => {
             `);
             pelatihanStats = pelatihan[0];
 
-            // D. Stats Onboarding (NEW)
+            // D. Stats Onboarding
             const [onboarding] = await db.execute(`
                 SELECT 
                     COUNT(*) as total_onboarding,
@@ -177,30 +176,41 @@ router.get('/stats', authenticate, async (req, res) => {
                 totalPelamar: totalPelamar,
                 lowonganAktif: lowongan[0].total,
                 totalKaryawan: employees[0].total,
+                karyawanAktif: employees[0].aktif || 0,  // ✅ FIXED: Return Int
+                karyawanTidakAktif: (employees[0].total || 0) - (employees[0].aktif || 0),  // ✅ FIXED: Calculate & return Int
                 pendingApproval: pendingApproval,
-                user: { kode: user_kode, is_hrd: is_hrd },
-                karyawanAktif: employees[0].aktif,
-                karyawanTidakAktif: employees[0].tidak_aktif,
-                
-                // Stats khusus Manager
-                ...((!is_hrd && pendingApproval > 0) && {
-                    pendingApproval: pendingApproval
-                }),
                 
                 // Stats khusus HRD
                 ...(is_hrd && {
                     shortlist: {
-                        total: shortlistStats.total_shortlist,
-                        verified: shortlistStats.verified,
-                        pending_decision: shortlistStats.pending_decision,
-                        hired: shortlistStats.hired,
-                        no_show: shortlistStats.no_show,  // ✅ TAMBAHKAN
-                        training: shortlistStats.training,  // ✅ TAMBAHKAN
-                        pending_onboarding: shortlistStats.pending_onboarding  // ✅ TAMBAHKAN
+                        total: shortlistStats.total_shortlist || 0,  // ✅ FIXED: Consistent field naming
+                        verified: shortlistStats.verified || 0,  // ✅ Already Int
+                        pending_decision: shortlistStats.pending_decision || 0,  // ✅ Already Int
+                        hired: shortlistStats.hired || 0,  // ✅ Already Int
+                        no_show: shortlistStats.no_show || 0,  // ✅ Already Int
+                        training: shortlistStats.training || 0,  // ✅ Already Int
+                        pending_onboarding: shortlistStats.pending_onboarding || 0  // ✅ Already Int
                     },
-                    evaluasi: evaluasiStats,
-                    pelatihan: pelatihanStats,
-                    onboarding: onboardingStats
+                    evaluasi: {
+                        total_evaluasi: evaluasiStats.total_evaluasi || 0,
+                        tes: evaluasiStats.tes || 0,  // ✅ Already Int
+                        interview_user: evaluasiStats.interview_user || 0,  // ✅ Already Int
+                        interview_hrd: evaluasiStats.interview_hrd || 0,  // ✅ Already Int
+                        completed: evaluasiStats.completed || 0,  // ✅ Already Int
+                        no_show: evaluasiStats.no_show || 0  // ✅ Already Int
+                    },
+                    pelatihan: {
+                        total_pelatihan: pelatihanStats.total_pelatihan || 0,
+                        ongoing: pelatihanStats.ongoing || 0,  // ✅ Already Int
+                        completed: pelatihanStats.completed || 0,  // ✅ Already Int
+                        failed: pelatihanStats.failed || 0  // ✅ Already Int
+                    },
+                    onboarding: {
+                        total_onboarding: onboardingStats.total_onboarding || 0,
+                        ongoing: onboardingStats.ongoing || 0,  // ✅ Already Int
+                        completed: onboardingStats.completed || 0,  // ✅ Already Int
+                        no_show: onboardingStats.no_show || 0  // ✅ Already Int
+                    }
                 }),
                 
                 // User info
