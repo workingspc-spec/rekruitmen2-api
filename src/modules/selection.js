@@ -1704,8 +1704,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
 
 /**
  * PUT /api/selection/decision
- * ✅ TRIGGER-ALIGNED VERSION
- * Menangani keputusan akhir, otomatisasi No-Show, dan penyesuaian SLA.
+ * ✅ TRIGGER-ALIGNED VERSION WITH EVALUATION SYNC
  */
 router.put('/decision', async (req, res) => {
     const { tpk_nomor, tlp_rkt_nomor, status_akhir, keterangan_no_show } = req.body;
@@ -1801,9 +1800,23 @@ router.put('/decision', async (req, res) => {
         };
 
         // ================================================================
-        // 4. LOGIKA NO-SHOW (Status 3) & SLA ADJUSTMENT
+        // 4. LOGIKA NO-SHOW (Status 3) & SLA ADJUSTMENT + EVALUATION SYNC
         // ================================================================
         if (parseInt(status_akhir) === 3) {
+            // ✅ FIX: SINKRONISASI EVALUASI SAAT NO-SHOW
+            // Update semua evaluasi yang masih 'SCHEDULED' menjadi 'NO_SHOW'
+            const [evalUpdateResult] = await connection.execute(
+                `UPDATE t_evaluasi 
+                 SET eval_status = 'NO_SHOW', eval_updated_at = NOW()
+                 WHERE eval_tlp_tpk_nomor = ? 
+                   AND eval_tlp_rkt_nomor = ?
+                   AND eval_status = 'SCHEDULED'`,
+                [tpk_nomor, tlp_rkt_nomor]
+            );
+
+            const evaluasiUpdated = evalUpdateResult.affectedRows;
+
+            // SLA Adjustment Logic
             const [alreadyNoShow] = await connection.execute(
                 `SELECT 1 FROM t_selection_log
                 WHERE log_tlp_tpk_nomor = ? 
@@ -1823,24 +1836,32 @@ router.put('/decision', async (req, res) => {
                         sla_final_target_date = DATE_ADD(sla_final_target_date, INTERVAL ? DAY),
                         sla_notes = CONCAT(
                             COALESCE(sla_notes, ''), 
-                            '\n[', NOW(), '] No-Show ke-', ?, ': ', ?, ' | Buffer +', ?, ' hari.'
+                            '\n[', NOW(), '] No-Show ke-', ?, ': ', ?, ' | Buffer +', ?, ' hari. Evaluasi SCHEDULED → NO_SHOW: ', ?, ' item.'
                         )
                     WHERE sla_tpk_nomor = ?`,
-                    [bufferDays, bufferDays, nthNoShow, keterangan_no_show || 'Tanpa keterangan', bufferDays, tpk_nomor]
+                    [bufferDays, bufferDays, nthNoShow, keterangan_no_show || 'Tanpa keterangan', bufferDays, evaluasiUpdated, tpk_nomor]
                 );
 
                 await logActivity(connection, {
                     tpk_nomor, tlp_rkt_nomor, action: 'NO_SHOW_TRIGGER',
                     status_before: oldStatus, status_after: 3, user_kode: req.user?.user_kode,
-                    keterangan: `No-Show decision → SLA +${bufferDays} hari`
+                    keterangan: `No-Show global → SLA +${bufferDays} hari | ${evaluasiUpdated} evaluasi SCHEDULED di-set ke NO_SHOW`
                 });
 
                 responseData.data = {
                     sla_adjustment: {
                         buffer_added: bufferDays,
                         edit_unlocked: true,
-                        total_noshow: nthNoShow
+                        total_noshow: nthNoShow,
+                        evaluasi_updated: evaluasiUpdated
                     }
+                };
+            } else {
+                // Jika sudah pernah No-Show sebelumnya, tetap update evaluasi tapi tidak adjust SLA lagi
+                responseData.data = {
+                    evaluasi_updated: evaluasiUpdated,
+                    sla_adjustment: null,
+                    message: 'Evaluasi diupdate, SLA tidak disesuaikan (sudah pernah No-Show sebelumnya)'
                 };
             }
         }

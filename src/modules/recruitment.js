@@ -17,9 +17,29 @@ const { addWorkdays, countWorkdays, formatDateSafe } = require('../utils/workday
 
 /**
  * VALIDASI DINAMIS (MENGGUNAKAN DATABASE)
+ * ✅ UPDATE: Tambah parameter ignoreLeadTime untuk mode Re-Schedule
  */
-async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh) {
+async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLeadTime = false) {
     try {
+        // ✅ LOGIKA BARU: Jika ignoreLeadTime true (Re-Schedule), hanya cek masa lalu
+        if (ignoreLeadTime) {
+            const today = new Date();
+            today.setHours(0, 0, 0, 0);
+            
+            const [y, m, d] = tgl_butuh.split('-').map(Number);
+            const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
+
+            if (requestedDate < today) {
+                return { 
+                    valid: false, 
+                    message: 'Untuk re-schedule, tanggal minimal adalah hari ini.' 
+                };
+            }
+            
+            return { valid: true };
+        }
+
+        // --- Logika Lead Time Standar (untuk Draft) ---
         const [rows] = await connection.execute(
             `SELECT COALESCE(jlt.jlt_min_days, 7) as min_days, COALESCE(jlt.jlt_is_flexible, 0) as is_flexible
              FROM tjabatan j
@@ -131,7 +151,8 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = p.tpk_nomor) as jml_pelamar,
                 sla.sla_final_target_date,
                 sla.sla_source,
-                sla.sla_status
+                sla.sla_status,
+                sla.sla_is_editable
             FROM tpermintaankaryawan p
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
@@ -211,6 +232,8 @@ router.get('/detail', authenticate, async (req, res) => {
                 sla.sla_user_vs_system_diff_days,
                 sla.sla_min_days,
                 sla.sla_status,
+                sla.sla_is_editable,
+                sla.sla_notes,     
                 sla.sla_calculated_at,
                 sla.sla_completed_at
              FROM tpermintaankaryawan t 
@@ -263,9 +286,18 @@ router.post('/save', authenticate, async (req, res) => {
             // ========== UPDATE LOGIC ==========
             await connection.beginTransaction();
 
-            // Validasi DI DALAM transaksi
+            // ✅ UPDATE: Validasi dengan parameter ignoreLeadTime
             if (jab_kode && tgl_butuh) {
-                const validation = await validateTglButuhFromDB(connection, jab_kode, tgl_butuh);
+                // Cek apakah ini mode Re-Schedule (sla_is_editable = 1)
+                const [slaCheck] = await connection.execute(
+                    'SELECT sla_is_editable FROM t_recruitment_sla WHERE sla_tpk_nomor = ?',
+                    [tpk_nomor]
+                );
+                
+                const isReSchedule = slaCheck.length > 0 && slaCheck[0].sla_is_editable === 1;
+                
+                // ✅ KIRIM isReSchedule sebagai parameter ignoreLeadTime
+                const validation = await validateTglButuhFromDB(connection, jab_kode, tgl_butuh, isReSchedule);
                 
                 if (!validation.valid) {
                     await connection.rollback();
@@ -429,8 +461,8 @@ router.post('/save', authenticate, async (req, res) => {
 
             await connection.beginTransaction();
 
-            // Validasi DI DALAM transaksi
-            const validation = await validateTglButuhFromDB(connection, jab_kode, tgl_butuh);
+            // ✅ Validasi DI DALAM transaksi - DRAFT selalu ketat (ignoreLeadTime = false)
+            const validation = await validateTglButuhFromDB(connection, jab_kode, tgl_butuh, false);
             
             if (!validation.valid) {
                 await connection.rollback();

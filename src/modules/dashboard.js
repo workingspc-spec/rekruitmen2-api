@@ -61,7 +61,7 @@ const getDateFilter = (period, dateColumn) => {
 router.get('/stats', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd = req.user.user_hrd;
-    const { period = 'All Time' } = req.query; // Ambil parameter period
+    const { period = 'All Time' } = req.query;
     
     const dateFilter = getDateFilter(period, 'tpk_tanggal');
     const wherePrefix = dateFilter ? ` WHERE ${dateFilter}` : '';
@@ -93,14 +93,12 @@ router.get('/stats', authenticate, async (req, res) => {
         // 5. APPROVAL STATUS
         let pendingApproval = 0;
         if (is_hrd) {
-            // Hitung permintaan yang sudah di-approve atasan tapi belum di-approve HRD
             const [hrdApprovals] = await db.execute(`
                 SELECT COUNT(*) as total FROM tpermintaankaryawan 
                 WHERE tpk_approveatasan = 1 AND tpk_approveHRD = 0
             `);
             pendingApproval = hrdApprovals[0].total;
         } else {
-            // Logika Manager (Nik Atasan)
             const approvalFilter = getDateFilter(period, 'tpk_tanggal');
             const [approvals] = await db.execute(`
                 SELECT COUNT(*) as total FROM tpermintaankaryawan p
@@ -167,56 +165,56 @@ router.get('/stats', authenticate, async (req, res) => {
             onboardingStats = onboarding[0];
         }
 
-        // ========== RESPONSE ==========
+        // ========== RESPONSE WITH NUMBER() WRAPPING ==========
         res.json({
             success: true,
             data: {
-                // Stats untuk semua role
-                totalPermintaan: permintaan[0].total,
-                totalPelamar: totalPelamar,
-                lowonganAktif: lowongan[0].total,
-                totalKaryawan: employees[0].total,
-                karyawanAktif: employees[0].aktif || 0,  // ✅ FIXED: Return Int
-                karyawanTidakAktif: (employees[0].total || 0) - (employees[0].aktif || 0),  // ✅ FIXED: Calculate & return Int
-                pendingApproval: pendingApproval,
+                // ✅ Stats untuk semua role - WRAPPED dengan Number()
+                totalPermintaan: Number(permintaan[0].total || 0),
+                totalPelamar: Number(totalPelamar || 0),
+                lowonganAktif: Number(lowongan[0].total || 0),
+                totalKaryawan: Number(employees[0].total || 0),
+                karyawanAktif: Number(employees[0].aktif || 0),
+                karyawanTidakAktif: Number((employees[0].total || 0) - (employees[0].aktif || 0)),
+                pendingApproval: Number(pendingApproval || 0),
                 
-                // Stats khusus HRD
+                // ✅ Stats khusus HRD - SEMUA WRAPPED dengan Number()
                 ...(is_hrd && {
                     shortlist: {
-                        total: shortlistStats.total_shortlist || 0,  // ✅ FIXED: Consistent field naming
-                        verified: shortlistStats.verified || 0,  // ✅ Already Int
-                        pending_decision: shortlistStats.pending_decision || 0,  // ✅ Already Int
-                        hired: shortlistStats.hired || 0,  // ✅ Already Int
-                        no_show: shortlistStats.no_show || 0,  // ✅ Already Int
-                        training: shortlistStats.training || 0,  // ✅ Already Int
-                        pending_onboarding: shortlistStats.pending_onboarding || 0  // ✅ Already Int
+                        total: Number(shortlistStats.total_shortlist || 0),
+                        verified: Number(shortlistStats.verified || 0),
+                        pending_decision: Number(shortlistStats.pending_decision || 0),
+                        hired: Number(shortlistStats.hired || 0),
+                        no_show: Number(shortlistStats.no_show || 0),
+                        training: Number(shortlistStats.training || 0),
+                        pending_onboarding: Number(shortlistStats.pending_onboarding || 0)
                     },
                     evaluasi: {
-                        total_evaluasi: evaluasiStats.total_evaluasi || 0,
-                        tes: evaluasiStats.tes || 0,  // ✅ Already Int
-                        interview_user: evaluasiStats.interview_user || 0,  // ✅ Already Int
-                        interview_hrd: evaluasiStats.interview_hrd || 0,  // ✅ Already Int
-                        completed: evaluasiStats.completed || 0,  // ✅ Already Int
-                        no_show: evaluasiStats.no_show || 0  // ✅ Already Int
+                        total_evaluasi: Number(evaluasiStats.total_evaluasi || 0),
+                        tes: Number(evaluasiStats.tes || 0),
+                        interview_user: Number(evaluasiStats.interview_user || 0),
+                        interview_hrd: Number(evaluasiStats.interview_hrd || 0),
+                        completed: Number(evaluasiStats.completed || 0),
+                        no_show: Number(evaluasiStats.no_show || 0)  // ✅ CRITICAL: Pastikan Number
                     },
                     pelatihan: {
-                        total_pelatihan: pelatihanStats.total_pelatihan || 0,
-                        ongoing: pelatihanStats.ongoing || 0,  // ✅ Already Int
-                        completed: pelatihanStats.completed || 0,  // ✅ Already Int
-                        failed: pelatihanStats.failed || 0  // ✅ Already Int
+                        total_pelatihan: Number(pelatihanStats.total_pelatihan || 0),
+                        ongoing: Number(pelatihanStats.ongoing || 0),
+                        completed: Number(pelatihanStats.completed || 0),
+                        failed: Number(pelatihanStats.failed || 0)
                     },
                     onboarding: {
-                        total_onboarding: onboardingStats.total_onboarding || 0,
-                        ongoing: onboardingStats.ongoing || 0,  // ✅ Already Int
-                        completed: onboardingStats.completed || 0,  // ✅ Already Int
-                        no_show: onboardingStats.no_show || 0  // ✅ Already Int
+                        total_onboarding: Number(onboardingStats.total_onboarding || 0),
+                        ongoing: Number(onboardingStats.ongoing || 0),
+                        completed: Number(onboardingStats.completed || 0),
+                        no_show: Number(onboardingStats.no_show || 0)
                     }
                 }),
                 
                 // User info
                 user: {
                     kode: user_kode,
-                    is_hrd: is_hrd
+                    is_hrd: Number(is_hrd)  // ✅ Convert boolean to number (0 or 1)
                 }
             }
         });
