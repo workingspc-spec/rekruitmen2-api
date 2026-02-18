@@ -1334,9 +1334,10 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
             const isFromApplicant = tlp_rkt_nomor.startsWith('APP-');
             let candidateData;
             let candidateName;
+            let applicant_id = null; // 👈 Tambahkan ini
 
             if (isFromApplicant) {
-                const applicant_id = tlp_rkt_nomor.replace('APP-', '');
+                applicant_id = tlp_rkt_nomor.replace('APP-', ''); // 👈 Isi variabelnya
                 const [applicantRows] = await connection.execute(
                     'SELECT * FROM t_applicant WHERE applicant_id = ? FOR UPDATE',
                     [applicant_id]
@@ -1365,13 +1366,14 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 // INSERT IGNORE = skip jika sudah ada, prevent duplicate key error.
                 // ================================================================
                 await connection.execute(
-                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status, rkt_tgllahir, rkt_jenkel) 
-                     VALUES (?, ?, 1, ?, ?)`,
+                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status, rkt_tgllahir, rkt_jenkel, rkt_identitas) 
+                    VALUES (?, ?, 1, ?, ?, ?)`, // 👈 Tambah rkt_identitas
                     [
                         tlp_rkt_nomor, 
                         candidateName,
                         candidateData.tanggal_lahir || null,
-                        candidateData.jenis_kelamin?.toLowerCase().includes('laki') ? 1 : 0
+                        candidateData.jenis_kelamin?.toLowerCase().includes('laki') ? 1 : 0,
+                        candidateData.nik // 👈 Masukkan NIK di sini
                     ]
                 );
 
@@ -1442,7 +1444,7 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 // Update status di t_applicant
                 await connection.execute(
                     'UPDATE t_applicant SET status_applicant = "HIRED", updated_at = NOW() WHERE applicant_id = ?',
-                    [tlp_rkt_nomor.replace('APP-', '')]
+                    [applicant_id] // 👈 Sekarang aman menggunakan variabel
                 );
 
             } else {
@@ -1536,32 +1538,16 @@ router.put('/onboarding/:onb_id/complete', async (req, res) => {
                 `UPDATE t_recruitment_sla 
                 SET 
                     sla_completed_at = CASE
-                        WHEN (
-                            SELECT COUNT(*) 
-                            FROM tlistpelamar 
-                            WHERE tlp_tpk_nomor = ?
-                            AND statusterakhir = 1
-                        ) >= (
-                            SELECT tpk_jumlah 
-                            FROM tpermintaankaryawan 
-                            WHERE tpk_nomor = ?
-                        )
+                        WHEN (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND statusterakhir = 1) >= 
+                            (SELECT tpk_jumlah FROM tpermintaankaryawan WHERE tpk_nomor = ?)
                         THEN NOW()
                         ELSE sla_completed_at
                     END,
                     sla_status = CASE
-                        WHEN (
-                            SELECT COUNT(*) 
-                            FROM tlistpelamar 
-                            WHERE tlp_tpk_nomor = ?
-                            AND statusterakhir = 1
-                        ) >= (
-                            SELECT tpk_jumlah 
-                            FROM tpermintaankaryawan 
-                            WHERE tpk_nomor = ?
-                        )
+                        WHEN (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND statusterakhir = 1) >= 
+                            (SELECT tpk_jumlah FROM tpermintaankaryawan WHERE tpk_nomor = ?)
                         THEN 'COMPLETED'
-                        ELSE 'ONGOING'
+                        ELSE 'CALCULATED' -- 👈 PERBAIKAN: Dari 'ONGOING' ke 'CALCULATED'
                     END
                 WHERE sla_tpk_nomor = ?`,
                 [tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor]
@@ -1899,9 +1885,10 @@ router.put('/decision', async (req, res) => {
             const isFromApplicant = tlp_rkt_nomor.startsWith('APP-');
             let candidateData;
             let candidateName;
+            let applicant_id = null; // 👈 Deklarasikan di sini (Opsi 1)
 
             if (isFromApplicant) {
-                const applicant_id = tlp_rkt_nomor.replace('APP-', '');
+                applicant_id = tlp_rkt_nomor.replace('APP-', ''); // 👈 Hilangkan 'const' agar mengisi variabel di atas
                 const [applicantRows] = await connection.execute(
                     'SELECT * FROM t_applicant WHERE applicant_id = ? FOR UPDATE',
                     [applicant_id]
@@ -1918,17 +1905,16 @@ router.put('/decision', async (req, res) => {
                 candidateData = applicantRows[0];
                 candidateName = candidateData.nama_lengkap;
 
-                // ================================================================
-                // 🔥 CRITICAL FIX: SHADOW RECORD FOR TRIGGER COMPATIBILITY
-                // ================================================================
+                // SHADOW RECORD FOR TRIGGER
                 await connection.execute(
-                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status, rkt_tgllahir, rkt_jenkel) 
-                    VALUES (?, ?, 1, ?, ?)`,
+                    `INSERT IGNORE INTO trekruitmen (rkt_nomor, rkt_nama, rkt_status, rkt_tgllahir, rkt_jenkel, rkt_identitas) 
+                    VALUES (?, ?, 1, ?, ?, ?)`, // 👈 Tambah rkt_identitas
                     [
                         tlp_rkt_nomor, 
                         candidateName,
                         candidateData.tanggal_lahir || null,
-                        candidateData.jenis_kelamin?.toLowerCase().includes('laki') ? 1 : 0
+                        candidateData.jenis_kelamin?.toLowerCase().includes('laki') ? 1 : 0,
+                        candidateData.nik // 👈 Masukkan NIK di sini
                     ]
                 );
 
@@ -2047,32 +2033,16 @@ router.put('/decision', async (req, res) => {
                 `UPDATE t_recruitment_sla 
                 SET 
                     sla_completed_at = CASE
-                        WHEN (
-                            SELECT COUNT(*) 
-                            FROM tlistpelamar 
-                            WHERE tlp_tpk_nomor = ?
-                            AND statusterakhir = 1
-                        ) >= (
-                            SELECT tpk_jumlah 
-                            FROM tpermintaankaryawan 
-                            WHERE tpk_nomor = ?
-                        )
+                        WHEN (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND statusterakhir = 1) >= 
+                            (SELECT tpk_jumlah FROM tpermintaankaryawan WHERE tpk_nomor = ?)
                         THEN NOW()
                         ELSE sla_completed_at
                     END,
                     sla_status = CASE
-                        WHEN (
-                            SELECT COUNT(*) 
-                            FROM tlistpelamar 
-                            WHERE tlp_tpk_nomor = ?
-                            AND statusterakhir = 1
-                        ) >= (
-                            SELECT tpk_jumlah 
-                            FROM tpermintaankaryawan 
-                            WHERE tpk_nomor = ?
-                        )
+                        WHEN (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = ? AND statusterakhir = 1) >= 
+                            (SELECT tpk_jumlah FROM tpermintaankaryawan WHERE tpk_nomor = ?)
                         THEN 'COMPLETED'
-                        ELSE 'ONGOING'
+                        ELSE 'CALCULATED' -- 👈 PERBAIKAN: Dari 'ONGOING' ke 'CALCULATED'
                     END
                 WHERE sla_tpk_nomor = ?`,
                 [tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor, tpk_nomor]
