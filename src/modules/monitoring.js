@@ -71,6 +71,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 
                 -- UI Status Tag untuk Mobile App
                 CASE 
+                    WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
                     WHEN CURDATE() > sla.sla_final_target_date THEN 'OVERDUE'
                     WHEN DATEDIFF(sla.sla_final_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
@@ -156,6 +157,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
             data: rows,
             summary: summary,
             ui_hints: {
+                COMPLETED: 'Rekrutmen selesai', // ✅ Tambahkan ini
                 NEED_USER_UPDATE: 'Anda perlu mengubah tanggal karena ada No-Show',
                 OVERDUE: 'Target sudah terlewat',
                 CRITICAL: '≤3 hari tersisa',
@@ -163,7 +165,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 ON_PROGRESS: 'Berjalan normal'
             }
         });
-
+        
     } catch (error) {
         console.error('❌ Error monitoring SLA:', error.message);
         res.status(500).json({ 
