@@ -1,14 +1,19 @@
 // src/modules/dashboard.js
 const express = require('express');
 const db = require('../config/db');
-const { authenticate, isHRD } = require('../middleware/authMiddleware'); // ✅ TAMBAHKAN INI
+const { authenticate, isHRD } = require('../middleware/authMiddleware');
 const router = express.Router();
 
-// Helper untuk menghasilkan filter tanggal SQL berdasarkan periode
+/**
+ * HELPER AMAN: Menghasilkan filter tanggal SQL (Parameterized)
+ * ✅ Mengembalikan { sql, params } untuk mencegah SQL Injection
+ */
 const getDateFilter = (period, dateColumn) => {
-    if (!period || period === 'All Time') return '';
-    
+    if (!period || period === 'All Time') return { sql: '', params: [] };
+
     let condition = '';
+    let params = [];
+
     switch (period) {
         case 'Today':
             condition = `DATE(${dateColumn}) = CURDATE()`;
@@ -35,16 +40,16 @@ const getDateFilter = (period, dateColumn) => {
             condition = `YEAR(${dateColumn}) = YEAR(CURDATE()) - 1`;
             break;
         default:
-            // Jika range kustom (format: YYYY-MM-DD,YYYY-MM-DD)
+            // ✅ Custom range (format: YYYY-MM-DD,YYYY-MM-DD) — pakai placeholder ?
             if (period.includes(',')) {
                 const [start, end] = period.split(',');
-                condition = `${dateColumn} BETWEEN '${start}' AND '${end}'`;
-            } else {
-                return '';
+                condition = `${dateColumn} BETWEEN ? AND ?`;
+                params.push(start.trim(), end.trim());
             }
     }
-    return condition;
+    return { sql: condition, params: params };
 };
+
 /**
  * =====================================================================
  * MODULE: DASHBOARD
@@ -62,33 +67,37 @@ router.get('/stats', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd = req.user.user_hrd;
     const { period = 'All Time' } = req.query;
-    
+
+    // ✅ Ambil objek { sql, params }
     const dateFilter = getDateFilter(period, 'tpk_tanggal');
-    const wherePrefix = dateFilter ? ` WHERE ${dateFilter}` : '';
+    const wherePrefix = dateFilter.sql ? ` WHERE ${dateFilter.sql}` : '';
 
     try {
         // 1. TOTAL PERMINTAAN (dengan filter tanggal)
         let permintaanQuery = `SELECT COUNT(*) as total FROM tpermintaankaryawan${wherePrefix}`;
-        const permintaanParams = [];
-        
+        const permintaanParams = [...dateFilter.params]; // ✅ Spread params dari filter
+
         if (!is_hrd) {
-            permintaanQuery += dateFilter ? ' AND tpk_peminta = ?' : ' WHERE tpk_peminta = ?';
+            permintaanQuery += dateFilter.sql ? ' AND tpk_peminta = ?' : ' WHERE tpk_peminta = ?';
             permintaanParams.push(user_kode);
         }
         const [permintaan] = await db.execute(permintaanQuery, permintaanParams);
 
-        // 2. TOTAL PELAMAR (Tanpa filter tanggal karena Bank Data biasanya bersifat akumulatif)
+        // 2. TOTAL PELAMAR (Akumulatif, tanpa filter tanggal)
         const [applicants] = await db.execute('SELECT COUNT(*) as total FROM t_applicant WHERE status_applicant != "HIRED"');
         const [rekruitmen] = await db.execute('SELECT COUNT(*) as total FROM trekruitmen WHERE rkt_status <> 1');
         const totalPelamar = applicants[0].total + rekruitmen[0].total;
 
-        // 3. LOWONGAN AKTIF (Filter tanggal berdasarkan kapan permintaan disetujui HRD)
+        // 3. LOWONGAN AKTIF
         const lowonganFilter = getDateFilter(period, 'tpk_tanggal');
-        const lowonganQuery = `SELECT COUNT(*) as total FROM tpermintaankaryawan WHERE tpk_approveHRD = 1${lowonganFilter ? ` AND ${lowonganFilter}` : ''}`;
-        const [lowongan] = await db.execute(lowonganQuery);
+        let lowonganQuery = `SELECT COUNT(*) as total FROM tpermintaankaryawan WHERE tpk_approveHRD = 1`;
+        if (lowonganFilter.sql) lowonganQuery += ` AND ${lowonganFilter.sql}`;
+        const [lowongan] = await db.execute(lowonganQuery, lowonganFilter.params);
 
-        // 4. KARYAWAN (Hanya HRD)
-        const [employees] = await db.execute(`SELECT COUNT(*) as total, SUM(CASE WHEN kar_status_aktif = 1 THEN 1 ELSE 0 END) as aktif FROM tkaryawan`);
+        // 4. KARYAWAN
+        const [employees] = await db.execute(
+            `SELECT COUNT(*) as total, SUM(CASE WHEN kar_status_aktif = 1 THEN 1 ELSE 0 END) as aktif FROM tkaryawan`
+        );
 
         // 5. APPROVAL STATUS
         let pendingApproval = 0;
@@ -100,15 +109,16 @@ router.get('/stats', authenticate, async (req, res) => {
             pendingApproval = hrdApprovals[0].total;
         } else {
             const approvalFilter = getDateFilter(period, 'tpk_tanggal');
-            const [approvals] = await db.execute(`
+            let appQuery = `
                 SELECT COUNT(*) as total FROM tpermintaankaryawan p
                 LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
-                WHERE k.kar_nik_atasan = ? AND p.tpk_approveatasan = 0${approvalFilter ? ` AND ${approvalFilter}` : ''}
-            `, [user_kode]);
+                WHERE k.kar_nik_atasan = ? AND p.tpk_approveatasan = 0`;
+            if (approvalFilter.sql) appQuery += ` AND ${approvalFilter.sql}`;
+            const [approvals] = await db.execute(appQuery, [user_kode, ...approvalFilter.params]);
             pendingApproval = approvals[0].total;
         }
 
-        // ========== 6. HRD SPECIFIC STATS (Shortlist, Evaluasi, Pelatihan, Onboarding) ==========
+        // ========== 6. HRD SPECIFIC STATS ==========
         let shortlistStats = null;
         let evaluasiStats = null;
         let pelatihanStats = null;
@@ -165,11 +175,10 @@ router.get('/stats', authenticate, async (req, res) => {
             onboardingStats = onboarding[0];
         }
 
-        // ========== RESPONSE WITH NUMBER() WRAPPING ==========
+        // ========== RESPONSE ==========
         res.json({
             success: true,
             data: {
-                // ✅ Stats untuk semua role - WRAPPED dengan Number()
                 totalPermintaan: Number(permintaan[0].total || 0),
                 totalPelamar: Number(totalPelamar || 0),
                 lowonganAktif: Number(lowongan[0].total || 0),
@@ -177,8 +186,7 @@ router.get('/stats', authenticate, async (req, res) => {
                 karyawanAktif: Number(employees[0].aktif || 0),
                 karyawanTidakAktif: Number((employees[0].total || 0) - (employees[0].aktif || 0)),
                 pendingApproval: Number(pendingApproval || 0),
-                
-                // ✅ Stats khusus HRD - SEMUA WRAPPED dengan Number()
+
                 ...(is_hrd && {
                     shortlist: {
                         total: Number(shortlistStats.total_shortlist || 0),
@@ -195,7 +203,7 @@ router.get('/stats', authenticate, async (req, res) => {
                         interview_user: Number(evaluasiStats.interview_user || 0),
                         interview_hrd: Number(evaluasiStats.interview_hrd || 0),
                         completed: Number(evaluasiStats.completed || 0),
-                        no_show: Number(evaluasiStats.no_show || 0)  // ✅ CRITICAL: Pastikan Number
+                        no_show: Number(evaluasiStats.no_show || 0)
                     },
                     pelatihan: {
                         total_pelatihan: Number(pelatihanStats.total_pelatihan || 0),
@@ -210,18 +218,17 @@ router.get('/stats', authenticate, async (req, res) => {
                         no_show: Number(onboardingStats.no_show || 0)
                     }
                 }),
-                
-                // User info
+
                 user: {
                     kode: user_kode,
-                    is_hrd: Number(is_hrd)  // ✅ Convert boolean to number (0 or 1)
+                    is_hrd: Number(is_hrd)
                 }
             }
         });
-        
+
     } catch (error) {
         console.error('❌ Dashboard stats error:', error);
-        res.status(500).json({ 
+        res.status(500).json({
             success: false,
             message: 'Gagal mengambil statistik dashboard',
             error: error.message
@@ -231,18 +238,17 @@ router.get('/stats', authenticate, async (req, res) => {
 
 /**
  * GET /api/dashboard/recent-activities
- * Aktivitas terbaru (opsional - untuk fitur timeline)
+ * Aktivitas terbaru
  */
-router.get('/recent-activities', async (req, res) => {
+router.get('/recent-activities', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd = req.user.user_hrd;
-    const { limit = 10 } = req.query;
+    const limit = parseInt(req.query.limit) || 10; // ✅ parseInt untuk keamanan
 
     try {
         let activities = [];
 
         if (is_hrd) {
-            // HRD: Lihat semua aktivitas terbaru
             const [recentRequests] = await db.execute(`
                 SELECT 
                     'request' as type,
@@ -259,12 +265,9 @@ router.get('/recent-activities', async (req, res) => {
                 LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
                 ORDER BY tpk_tanggal DESC
                 LIMIT ?
-            `, [parseInt(limit)]);
-
+            `, [limit]);
             activities = recentRequests;
-
         } else {
-            // Manager: Lihat permintaan sendiri & approval requests
             const [myActivities] = await db.execute(`
                 SELECT 
                     'my_request' as type,
@@ -281,8 +284,7 @@ router.get('/recent-activities', async (req, res) => {
                 WHERE tpk_peminta = ?
                 ORDER BY tpk_tanggal DESC
                 LIMIT ?
-            `, [user_kode, parseInt(limit)]);
-
+            `, [user_kode, limit]);
             activities = myActivities;
         }
 
@@ -304,16 +306,16 @@ router.get('/recent-activities', async (req, res) => {
 
 /**
  * GET /api/dashboard/charts-data
- * Data untuk charts (opsional - untuk visualisasi)
+ * Data untuk charts
  */
-router.get('/charts-data', async (req, res) => {
+router.get('/charts-data', authenticate, async (req, res) => {
     const is_hrd = req.user.user_hrd;
 
     try {
         let chartsData = {};
 
         if (is_hrd) {
-            // ========== CHART 1: Permintaan per Bulan (6 bulan terakhir) ==========
+            // CHART 1: Permintaan per Bulan (6 bulan terakhir)
             const [monthlyRequests] = await db.execute(`
                 SELECT 
                     DATE_FORMAT(tpk_tanggal, '%Y-%m') as month,
@@ -324,7 +326,7 @@ router.get('/charts-data', async (req, res) => {
                 ORDER BY month ASC
             `);
 
-            // ========== CHART 2: Status Approval ==========
+            // CHART 2: Status Approval
             const [approvalStats] = await db.execute(`
                 SELECT 
                     SUM(CASE WHEN tpk_approveatasan = 0 THEN 1 ELSE 0 END) as pending_manager,
@@ -334,7 +336,7 @@ router.get('/charts-data', async (req, res) => {
                 FROM tpermintaankaryawan
             `);
 
-            // ========== CHART 3: Karyawan per Status Kerja ==========
+            // CHART 3: Karyawan per Status Kerja
             const [employeeStatus] = await db.execute(`
                 SELECT 
                     SUM(CASE WHEN kar_status_kerja = 0 THEN 1 ELSE 0 END) as harian,
@@ -366,13 +368,13 @@ router.get('/charts-data', async (req, res) => {
     }
 });
 
-
 /**
  * GET /api/dashboard/sla-analysis
  * Analisis SLA untuk evaluasi proses HRD vs User Planning
  */
-router.get('/sla-analysis', isHRD, async (req, res) => {
-    const { year = new Date().getFullYear(), month } = req.query;
+router.get('/sla-analysis', authenticate, isHRD, async (req, res) => {
+    const year = parseInt(req.query.year) || new Date().getFullYear(); // ✅ parseInt
+    const month = req.query.month ? parseInt(req.query.month) : null;  // ✅ parseInt
 
     try {
         let whereClause = 'WHERE YEAR(sla_request_created_at) = ? AND sla_status = "CALCULATED"';
@@ -406,7 +408,7 @@ router.get('/sla-analysis', isHRD, async (req, res) => {
             analysis: {
                 system_adjusted_percentage: ((data.system_adjusted / data.total_requests) * 100).toFixed(2) + '%',
                 user_met_percentage: ((data.user_met / data.total_requests) * 100).toFixed(2) + '%',
-                recommendation: data.system_adjusted > data.user_met 
+                recommendation: data.system_adjusted > data.user_met
                     ? '⚠️ Banyak permintaan tidak realistis. Perlu edukasi user tentang lead time rekrutmen.'
                     : '✅ Mayoritas permintaan sudah realistis. User planning baik.',
                 avg_approval_delay_interpretation: data.avg_approval_delay > 3
@@ -425,8 +427,8 @@ router.get('/sla-analysis', isHRD, async (req, res) => {
  * GET /api/dashboard/sla-by-job
  * Breakdown SLA per jabatan
  */
-router.get('/sla-by-job', isHRD, async (req, res) => {
-    const { year = new Date().getFullYear() } = req.query;
+router.get('/sla-by-job', authenticate, isHRD, async (req, res) => {
+    const year = parseInt(req.query.year) || new Date().getFullYear(); // ✅ parseInt
 
     try {
         const sql = `
@@ -458,12 +460,14 @@ router.get('/sla-by-job', isHRD, async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 });
+
 /**
  * GET /api/dashboard/sla-performance
  * Mengukur kecepatan HRD dalam menyelesaikan rekrutmen
  */
-router.get('/sla-performance', isHRD, async (req, res) => {
-    const { year = new Date().getFullYear(), month } = req.query;
+router.get('/sla-performance', authenticate, isHRD, async (req, res) => {
+    const year = parseInt(req.query.year) || new Date().getFullYear(); // ✅ parseInt
+    const month = req.query.month ? parseInt(req.query.month) : null;  // ✅ parseInt
 
     try {
         let whereClause = 'WHERE YEAR(sla_request_created_at) = ? AND sla_status = "COMPLETED"';
@@ -477,23 +481,12 @@ router.get('/sla-performance', isHRD, async (req, res) => {
         const sql = `
             SELECT 
                 COUNT(*) as total_completed,
-                
-                -- Waktu dari request ke approval
                 AVG(DATEDIFF(sla_calculated_at, sla_request_created_at)) as avg_days_to_approval,
-                
-                -- Waktu dari approval ke hire
                 AVG(DATEDIFF(sla_completed_at, sla_calculated_at)) as avg_days_to_hire,
-                
-                -- Total waktu end-to-end
                 AVG(DATEDIFF(sla_completed_at, sla_request_created_at)) as avg_total_days,
-                
-                -- Perbandingan dengan target
                 AVG(DATEDIFF(sla_final_target_date, sla_completed_at)) as avg_vs_target,
-                
-                -- Persentase on-time
                 SUM(CASE WHEN sla_completed_at <= sla_final_target_date THEN 1 ELSE 0 END) as ontime_count,
                 SUM(CASE WHEN sla_completed_at > sla_final_target_date THEN 1 ELSE 0 END) as late_count
-                
             FROM t_recruitment_sla
             ${whereClause}
         `;
@@ -518,7 +511,7 @@ router.get('/sla-performance', isHRD, async (req, res) => {
                     hiring_phase: Math.round(data.avg_days_to_hire) + ' hari',
                     total: Math.round(data.avg_total_days) + ' hari'
                 },
-                vs_target: data.avg_vs_target > 0 
+                vs_target: data.avg_vs_target > 0
                     ? `✅ Lebih cepat ${Math.abs(Math.round(data.avg_vs_target))} hari dari target`
                     : `⚠️ Lebih lambat ${Math.abs(Math.round(data.avg_vs_target))} hari dari target`
             }
@@ -557,11 +550,12 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
 
         const [rows] = await db.execute(sql);
 
-        // Menambah logika klasifikasi di tingkat aplikasi
         const processedData = rows.map(row => ({
             ...row,
             kpi_status: row.net_hrd_duration <= row.sla_min_days ? 'EXCELLENT' : 'DELAY',
-            score: row.net_hrd_duration <= row.sla_min_days ? 100 : Math.max(0, 100 - (row.net_hrd_duration - row.sla_min_days) * 5)
+            score: row.net_hrd_duration <= row.sla_min_days
+                ? 100
+                : Math.max(0, 100 - (row.net_hrd_duration - row.sla_min_days) * 5)
         }));
 
         res.json({
@@ -572,7 +566,9 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
                 on_time_rate: (processedData.filter(d => d.kpi_status === 'EXCELLENT').length / processedData.length * 100).toFixed(2) + '%'
             }
         });
+
     } catch (error) {
+        console.error('❌ HRD KPI Report error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });

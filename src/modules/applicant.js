@@ -24,6 +24,18 @@ const router = express.Router();
  * ✅ PUBLIC - List lowongan yang sudah approve HRD (untuk pelamar)
  */
 router.get('/job-openings', async (req, res) => {
+    // 1. Ambil API Key dari header
+    const apiKey = req.headers['x-api-key'];
+
+    // 2. Validasi API Key terhadap .env
+    if (!apiKey || apiKey !== process.env.GFORM_SECRET) {
+        console.warn(`⚠️  Unauthorized attempt to fetch job-openings from IP: ${req.ip}`);
+        return res.status(403).json({ 
+            success: false, 
+            message: 'Akses ditolak: API Key tidak valid' 
+        });
+    }
+
     const { filter } = req.query;
     
     try {
@@ -68,6 +80,18 @@ router.get('/job-openings', async (req, res) => {
  * ✅ PUBLIC - Endpoint untuk menerima data dari Google Forms
  */
 router.post('/submit-form', async (req, res) => {
+    // 1. Ambil API Key dari header request
+    const apiKey = req.headers['x-api-key'];
+
+    // 2. Validasi API Key
+    if (!apiKey || apiKey !== process.env.GFORM_SECRET) {
+        console.warn(`⚠️  Unauthorized access attempt from IP: ${req.ip}`);
+        return res.status(403).json({ 
+            success: false, 
+            message: 'Akses ditolak: API Key tidak valid atau tidak ditemukan' 
+        });
+    }
+
     const {
         timestamp,
         nik, nama, jenis_kelamin, tempat_lahir, tanggal_lahir,

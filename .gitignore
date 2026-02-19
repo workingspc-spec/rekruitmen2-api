@@ -6,6 +6,7 @@ node_modules/
 .env.ngrok
 .env.production
 .env.*
+service-account.json
 
 # Logs
 logs/

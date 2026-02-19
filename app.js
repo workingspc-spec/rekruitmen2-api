@@ -2,6 +2,8 @@
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const helmet = require('helmet');
+const { startSyncJob } = require('./src/jobs/syncApplicants');
 
 // ✅ Set timezone SEBELUM apa pun
 process.env.TZ = 'Asia/Jakarta';
@@ -24,9 +26,8 @@ console.log(`📦 Using env file: ${envFile}`);
 // ✅ INIT EXPRESS HARUS DI SINI
 const app = express();
 
-
 // ================= MIDDLEWARE =================
-
+app.use(helmet());
 // ✅ Database timezone helper (AMAN POSISINYA)
 app.use((req, res, next) => {
   req.dbTimezone = '+07:00';
@@ -97,4 +98,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV}`);
+
+  // ✅ JALANKAN SYNC JOB DI SINI
+  // Akan otomatis jalan setiap 5 menit (atau sesuai setting cron di syncApplicants.js)
+  startSyncJob();
 });

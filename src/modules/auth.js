@@ -1,9 +1,21 @@
 // src/modules/auth.js
+const rateLimit = require('express-rate-limit');
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
 const { authenticate } = require('../middleware/authMiddleware');
 const router = express.Router();
+
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 menit
+    max: 50,                   // Maks 50 request
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+        success: false,
+        message: 'Terlalu banyak percobaan login. Coba lagi dalam 15 menit.'
+    }
+});
 
 /**
  * =====================================================================
@@ -15,7 +27,7 @@ const router = express.Router();
  * POST /api/auth/login
  * PUBLIC - Login endpoint
  */
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
     const { username, password, expiredDays } = req.body;
 
     if (!username || !password) {
