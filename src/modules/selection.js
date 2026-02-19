@@ -2115,13 +2115,14 @@ router.get('/summary/:tpk_nomor', async (req, res) => {
                 SUM(CASE WHEN statusterakhir = 3 THEN 1 ELSE 0 END) AS tidak_datang,
                 SUM(CASE WHEN statusterakhir = 4 THEN 1 ELSE 0 END) AS pelatihan,
                 SUM(CASE WHEN statusterakhir = 5 THEN 1 ELSE 0 END) AS approved_pending_onboarding,
-                SUM(CASE WHEN statusterakhir = 6 THEN 1 ELSE 0 END) AS failed_onboarding
+                SUM(CASE WHEN statusterakhir = 6 THEN 1 ELSE 0 END) AS failed_onboarding,
+                -- ✅ FIX: Ambil jumlah kebutuhan lowongan dari tabel TPK
+                (SELECT tpk_jumlah FROM tpermintaankaryawan WHERE tpk_nomor = ?) AS target_count
             FROM tlistpelamar
             WHERE tlp_tpk_nomor = ?`,
-            [tpk_nomor]
+            [tpk_nomor, tpk_nomor]
         );
 
-        // ✅ CRITICAL FIX: Ensure all values are integers
         const rawData = rows[0];
 
         res.json({
@@ -2136,12 +2137,14 @@ router.get('/summary/:tpk_nomor', async (req, res) => {
                 sudah_interview_user: Number(rawData.sudah_interview_user || 0),
                 sudah_interview_hrd: Number(rawData.sudah_interview_hrd || 0),
                 belum_diputuskan: Number(rawData.belum_diputuskan || 0),
-                hired: Number(rawData.hired || 0), // Pastikan Number
+                hired: Number(rawData.hired || 0),
                 ditolak: Number(rawData.ditolak || 0),
-                tidak_datang: Number(rawData.tidak_datang || 0), // Pastikan Number
+                tidak_datang: Number(rawData.tidak_datang || 0),
                 pelatihan: Number(rawData.pelatihan || 0),
                 approved_pending_onboarding: Number(rawData.approved_pending_onboarding || 0),
-                failed_onboarding: Number(rawData.failed_onboarding || 0)
+                failed_onboarding: Number(rawData.failed_onboarding || 0),
+                // ✅ FIX: Sertakan target_count
+                target_count: Number(rawData.target_count || 0)
             }
         });
 

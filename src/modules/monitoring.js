@@ -31,17 +31,16 @@ router.get('/sla-status', authenticate, async (req, res) => {
     const { user_kode, user_hrd } = req.user;
 
     try {
-        // Build WHERE clause berdasarkan role
         let whereClause;
         let params;
 
         if (user_hrd === 1) {
-            // HRD: Lihat semua
-            whereClause = 'WHERE sla.sla_status = "CALCULATED"';
+            // ✅ FIX: Jangan filter hanya CALCULATED agar riwayat COMPLETED tetap muncul
+            whereClause = 'WHERE sla.sla_status IN ("CALCULATED", "COMPLETED")';
             params = [];
         } else {
-            // Peminta/Atasan: Lihat miliknya ATAU milik bawahannya
-            whereClause = `WHERE (p.tpk_peminta = ? OR k.kar_nik_atasan = ?) AND sla.sla_status = "CALCULATED"`;
+            whereClause = `WHERE (p.tpk_peminta = ? OR k.kar_nik_atasan = ?) 
+                           AND sla.sla_status IN ("CALCULATED", "COMPLETED")`;
             params = [user_kode, user_kode];
         }
 

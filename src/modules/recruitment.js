@@ -149,6 +149,8 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
                 DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
                 (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = p.tpk_nomor) as jml_pelamar,
+                -- ✅ FIX: Tambahkan subquery hired_count di sini
+                (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = p.tpk_nomor AND statusterakhir = 1) as hired_count,
                 sla.sla_final_target_date,
                 sla.sla_source,
                 sla.sla_status,
@@ -877,7 +879,10 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
                 DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
                 DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
                 sla.sla_final_target_date,
-                sla.sla_source
+                sla.sla_source,
+                -- ✅ FIX: Tambahkan subquery hired_count agar UI tahu progress lowongan
+                (SELECT COUNT(*) FROM tlistpelamar 
+                 WHERE tlp_tpk_nomor = p.tpk_nomor AND statusterakhir = 1) as hired_count
             FROM tpermintaankaryawan p
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN tkaryawan k ON k.kar_Nik = p.tpk_peminta
