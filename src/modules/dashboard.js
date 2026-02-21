@@ -5,8 +5,7 @@ const { authenticate, isHRD } = require('../middleware/authMiddleware');
 const router = express.Router();
 
 /**
- * HELPER AMAN: Menghasilkan filter tanggal SQL (Parameterized)
- * ✅ Mengembalikan { sql, params } untuk mencegah SQL Injection
+ * HELPER: Filter tanggal SQL (Parameterized)
  */
 const getDateFilter = (period, dateColumn) => {
     if (!period || period === 'All Time') return { sql: '', params: [] };
@@ -40,22 +39,14 @@ const getDateFilter = (period, dateColumn) => {
             condition = `YEAR(${dateColumn}) = YEAR(CURDATE()) - 1`;
             break;
         default:
-            // ✅ Custom range (format: YYYY-MM-DD,YYYY-MM-DD) — pakai placeholder ?
             if (period.includes(',')) {
                 const [start, end] = period.split(',');
                 condition = `${dateColumn} BETWEEN ? AND ?`;
                 params.push(start.trim(), end.trim());
             }
     }
-    return { sql: condition, params: params };
+    return { sql: condition, params };
 };
-
-/**
- * =====================================================================
- * MODULE: DASHBOARD
- * Statistik dan ringkasan untuk dashboard aplikasi
- * =====================================================================
- */
 
 /**
  * GET /api/dashboard/stats
@@ -68,14 +59,13 @@ router.get('/stats', authenticate, async (req, res) => {
     const is_hrd = req.user.user_hrd;
     const { period = 'All Time' } = req.query;
 
-    // ✅ Ambil objek { sql, params }
     const dateFilter = getDateFilter(period, 'tpk_tanggal');
     const wherePrefix = dateFilter.sql ? ` WHERE ${dateFilter.sql}` : '';
 
     try {
-        // 1. TOTAL PERMINTAAN (dengan filter tanggal)
+        // 1. TOTAL PERMINTAAN
         let permintaanQuery = `SELECT COUNT(*) as total FROM tpermintaankaryawan${wherePrefix}`;
-        const permintaanParams = [...dateFilter.params]; // ✅ Spread params dari filter
+        const permintaanParams = [...dateFilter.params];
 
         if (!is_hrd) {
             permintaanQuery += dateFilter.sql ? ' AND tpk_peminta = ?' : ' WHERE tpk_peminta = ?';
@@ -83,23 +73,13 @@ router.get('/stats', authenticate, async (req, res) => {
         }
         const [permintaan] = await db.execute(permintaanQuery, permintaanParams);
 
-        // 2. TOTAL PELAMAR (Akumulatif, tanpa filter tanggal)
-        const [applicants] = await db.execute('SELECT COUNT(*) as total FROM t_applicant WHERE status_applicant != "HIRED"');
-        const [rekruitmen] = await db.execute('SELECT COUNT(*) as total FROM trekruitmen WHERE rkt_status <> 1');
-        const totalPelamar = applicants[0].total + rekruitmen[0].total;
-
-        // 3. LOWONGAN AKTIF
+        // 2. LOWONGAN AKTIF (approved HRD)
         const lowonganFilter = getDateFilter(period, 'tpk_tanggal');
         let lowonganQuery = `SELECT COUNT(*) as total FROM tpermintaankaryawan WHERE tpk_approveHRD = 1`;
         if (lowonganFilter.sql) lowonganQuery += ` AND ${lowonganFilter.sql}`;
         const [lowongan] = await db.execute(lowonganQuery, lowonganFilter.params);
 
-        // 4. KARYAWAN
-        const [employees] = await db.execute(
-            `SELECT COUNT(*) as total, SUM(CASE WHEN kar_status_aktif = 1 THEN 1 ELSE 0 END) as aktif FROM tkaryawan`
-        );
-
-        // 5. APPROVAL STATUS
+        // 3. PENDING APPROVAL
         let pendingApproval = 0;
         if (is_hrd) {
             const [hrdApprovals] = await db.execute(`
@@ -118,104 +98,35 @@ router.get('/stats', authenticate, async (req, res) => {
             pendingApproval = approvals[0].total;
         }
 
-        // ========== 6. HRD SPECIFIC STATS ==========
-        let shortlistStats = null;
-        let evaluasiStats = null;
-        let pelatihanStats = null;
-        let onboardingStats = null;
-
+        // 4. SLA SUMMARY (khusus HRD)
+        let slaStats = null;
         if (is_hrd) {
-            // A. Shortlist Progress
-            const [shortlist] = await db.execute(`
+            const [sla] = await db.execute(`
                 SELECT 
-                    COUNT(*) as total_shortlist,
-                    SUM(CASE WHEN tlp_status = 1 THEN 1 ELSE 0 END) as verified,
-                    SUM(CASE WHEN statusterakhir = 0 THEN 1 ELSE 0 END) as pending_decision,
-                    SUM(CASE WHEN statusterakhir = 1 THEN 1 ELSE 0 END) as hired,
-                    SUM(CASE WHEN statusterakhir = 3 THEN 1 ELSE 0 END) as no_show,
-                    SUM(CASE WHEN statusterakhir = 4 THEN 1 ELSE 0 END) as training,
-                    SUM(CASE WHEN statusterakhir = 5 THEN 1 ELSE 0 END) as pending_onboarding
-                FROM tlistpelamar
+                    COUNT(*) as total_active,
+                    SUM(CASE WHEN sla_status = 'CALCULATED' THEN 1 ELSE 0 END) as calculated,
+                    SUM(CASE WHEN sla_status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
+                    SUM(CASE WHEN sla_is_editable = 1 THEN 1 ELSE 0 END) as need_user_update,
+                    SUM(CASE WHEN sla_status = 'CALCULATED' AND CURDATE() > sla_final_target_date THEN 1 ELSE 0 END) as overdue
+                FROM t_recruitment_sla
             `);
-            shortlistStats = shortlist[0];
-
-            // B. Stats Evaluasi
-            const [evaluasi] = await db.execute(`
-                SELECT 
-                    COUNT(*) as total_evaluasi,
-                    SUM(CASE WHEN eval_jenis = 'TES' THEN 1 ELSE 0 END) as tes,
-                    SUM(CASE WHEN eval_jenis = 'INTERVIEW_USER' THEN 1 ELSE 0 END) as interview_user,
-                    SUM(CASE WHEN eval_jenis = 'INTERVIEW_HRD' THEN 1 ELSE 0 END) as interview_hrd,
-                    SUM(CASE WHEN eval_status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN eval_status = 'NO_SHOW' THEN 1 ELSE 0 END) as no_show
-                FROM t_evaluasi
-            `);
-            evaluasiStats = evaluasi[0];
-
-            // C. Stats Pelatihan
-            const [pelatihan] = await db.execute(`
-                SELECT 
-                    COUNT(*) as total_pelatihan,
-                    SUM(CASE WHEN pel_status = 'ONGOING' THEN 1 ELSE 0 END) as ongoing,
-                    SUM(CASE WHEN pel_status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN pel_status = 'FAILED' THEN 1 ELSE 0 END) as failed
-                FROM t_pelatihan
-            `);
-            pelatihanStats = pelatihan[0];
-
-            // D. Stats Onboarding
-            const [onboarding] = await db.execute(`
-                SELECT 
-                    COUNT(*) as total_onboarding,
-                    SUM(CASE WHEN onb_status = 'ONGOING' THEN 1 ELSE 0 END) as ongoing,
-                    SUM(CASE WHEN onb_status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
-                    SUM(CASE WHEN onb_status = 'NO_SHOW' THEN 1 ELSE 0 END) as no_show
-                FROM t_onboarding
-            `);
-            onboardingStats = onboarding[0];
+            slaStats = sla[0];
         }
 
-        // ========== RESPONSE ==========
         res.json({
             success: true,
             data: {
                 totalPermintaan: Number(permintaan[0].total || 0),
-                totalPelamar: Number(totalPelamar || 0),
                 lowonganAktif: Number(lowongan[0].total || 0),
-                totalKaryawan: Number(employees[0].total || 0),
-                karyawanAktif: Number(employees[0].aktif || 0),
-                karyawanTidakAktif: Number((employees[0].total || 0) - (employees[0].aktif || 0)),
                 pendingApproval: Number(pendingApproval || 0),
 
                 ...(is_hrd && {
-                    shortlist: {
-                        total: Number(shortlistStats.total_shortlist || 0),
-                        verified: Number(shortlistStats.verified || 0),
-                        pending_decision: Number(shortlistStats.pending_decision || 0),
-                        hired: Number(shortlistStats.hired || 0),
-                        no_show: Number(shortlistStats.no_show || 0),
-                        training: Number(shortlistStats.training || 0),
-                        pending_onboarding: Number(shortlistStats.pending_onboarding || 0)
-                    },
-                    evaluasi: {
-                        total_evaluasi: Number(evaluasiStats.total_evaluasi || 0),
-                        tes: Number(evaluasiStats.tes || 0),
-                        interview_user: Number(evaluasiStats.interview_user || 0),
-                        interview_hrd: Number(evaluasiStats.interview_hrd || 0),
-                        completed: Number(evaluasiStats.completed || 0),
-                        no_show: Number(evaluasiStats.no_show || 0)
-                    },
-                    pelatihan: {
-                        total_pelatihan: Number(pelatihanStats.total_pelatihan || 0),
-                        ongoing: Number(pelatihanStats.ongoing || 0),
-                        completed: Number(pelatihanStats.completed || 0),
-                        failed: Number(pelatihanStats.failed || 0)
-                    },
-                    onboarding: {
-                        total_onboarding: Number(onboardingStats.total_onboarding || 0),
-                        ongoing: Number(onboardingStats.ongoing || 0),
-                        completed: Number(onboardingStats.completed || 0),
-                        no_show: Number(onboardingStats.no_show || 0)
+                    sla: {
+                        total_active: Number(slaStats.total_active || 0),
+                        calculated: Number(slaStats.calculated || 0),
+                        completed: Number(slaStats.completed || 0),
+                        need_user_update: Number(slaStats.need_user_update || 0),
+                        overdue: Number(slaStats.overdue || 0)
                     }
                 }),
 
@@ -238,12 +149,12 @@ router.get('/stats', authenticate, async (req, res) => {
 
 /**
  * GET /api/dashboard/recent-activities
- * Aktivitas terbaru
+ * Aktivitas terbaru berdasarkan permintaan karyawan
  */
 router.get('/recent-activities', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd = req.user.user_hrd;
-    const limit = parseInt(req.query.limit) || 10; // ✅ parseInt untuk keamanan
+    const limit = parseInt(req.query.limit) || 10;
 
     try {
         let activities = [];
@@ -259,6 +170,7 @@ router.get('/recent-activities', authenticate, async (req, res) => {
                     CASE 
                         WHEN tpk_approveHRD = 1 THEN 'approved_hrd'
                         WHEN tpk_approveatasan = 1 THEN 'approved_manager'
+                        WHEN tpk_approveatasan = 2 THEN 'rejected_manager'
                         ELSE 'created'
                     END as action
                 FROM tpermintaankaryawan p
@@ -336,27 +248,24 @@ router.get('/charts-data', authenticate, async (req, res) => {
                 FROM tpermintaankaryawan
             `);
 
-            // CHART 3: Karyawan per Status Kerja
-            const [employeeStatus] = await db.execute(`
+            // CHART 3: SLA Source Distribution
+            const [slaSource] = await db.execute(`
                 SELECT 
-                    SUM(CASE WHEN kar_status_kerja = 0 THEN 1 ELSE 0 END) as harian,
-                    SUM(CASE WHEN kar_status_kerja = 1 THEN 1 ELSE 0 END) as pkwt,
-                    SUM(CASE WHEN kar_status_kerja = 2 THEN 1 ELSE 0 END) as pkwtt
-                FROM tkaryawan
-                WHERE kar_status_aktif = 1
+                    SUM(CASE WHEN sla_source = 'SYSTEM' THEN 1 ELSE 0 END) as system_adjusted,
+                    SUM(CASE WHEN sla_source = 'USER' THEN 1 ELSE 0 END) as user_met,
+                    SUM(CASE WHEN sla_source = 'FLEXIBLE' THEN 1 ELSE 0 END) as flexible
+                FROM t_recruitment_sla
+                WHERE sla_status IN ('CALCULATED', 'COMPLETED')
             `);
 
             chartsData = {
-                monthlyRequests: monthlyRequests,
+                monthlyRequests,
                 approvalStats: approvalStats[0],
-                employeeStatus: employeeStatus[0]
+                slaSource: slaSource[0]
             };
         }
 
-        res.json({
-            success: true,
-            data: chartsData
-        });
+        res.json({ success: true, data: chartsData });
 
     } catch (error) {
         console.error('❌ Charts data error:', error);
@@ -373,8 +282,8 @@ router.get('/charts-data', authenticate, async (req, res) => {
  * Analisis SLA untuk evaluasi proses HRD vs User Planning
  */
 router.get('/sla-analysis', authenticate, isHRD, async (req, res) => {
-    const year = parseInt(req.query.year) || new Date().getFullYear(); // ✅ parseInt
-    const month = req.query.month ? parseInt(req.query.month) : null;  // ✅ parseInt
+    const year = parseInt(req.query.year) || new Date().getFullYear();
+    const month = req.query.month ? parseInt(req.query.month) : null;
 
     try {
         let whereClause = 'WHERE YEAR(sla_request_created_at) = ? AND sla_status = "CALCULATED"';
@@ -385,7 +294,7 @@ router.get('/sla-analysis', authenticate, isHRD, async (req, res) => {
             params.push(month);
         }
 
-        const sql = `
+        const [rows] = await db.execute(`
             SELECT 
                 COUNT(*) as total_requests,
                 AVG(sla_approval_delay_days) as avg_approval_delay,
@@ -396,18 +305,21 @@ router.get('/sla-analysis', authenticate, isHRD, async (req, res) => {
                 MAX(sla_user_vs_system_diff_days) as max_extension_days
             FROM t_recruitment_sla
             ${whereClause}
-        `;
+        `, params);
 
-        const [rows] = await db.execute(sql, params);
         const data = rows[0];
 
         res.json({
             success: true,
             period: month ? `${year}-${String(month).padStart(2, '0')}` : year,
-            data: data,
+            data,
             analysis: {
-                system_adjusted_percentage: ((data.system_adjusted / data.total_requests) * 100).toFixed(2) + '%',
-                user_met_percentage: ((data.user_met / data.total_requests) * 100).toFixed(2) + '%',
+                system_adjusted_percentage: data.total_requests > 0
+                    ? ((data.system_adjusted / data.total_requests) * 100).toFixed(2) + '%'
+                    : '0%',
+                user_met_percentage: data.total_requests > 0
+                    ? ((data.user_met / data.total_requests) * 100).toFixed(2) + '%'
+                    : '0%',
                 recommendation: data.system_adjusted > data.user_met
                     ? '⚠️ Banyak permintaan tidak realistis. Perlu edukasi user tentang lead time rekrutmen.'
                     : '✅ Mayoritas permintaan sudah realistis. User planning baik.',
@@ -428,10 +340,10 @@ router.get('/sla-analysis', authenticate, isHRD, async (req, res) => {
  * Breakdown SLA per jabatan
  */
 router.get('/sla-by-job', authenticate, isHRD, async (req, res) => {
-    const year = parseInt(req.query.year) || new Date().getFullYear(); // ✅ parseInt
+    const year = parseInt(req.query.year) || new Date().getFullYear();
 
     try {
-        const sql = `
+        const [rows] = await db.execute(`
             SELECT 
                 sla_job_code,
                 j.jab_nama,
@@ -445,15 +357,9 @@ router.get('/sla-by-job', authenticate, isHRD, async (req, res) => {
             WHERE YEAR(sla_request_created_at) = ? AND sla_status = 'CALCULATED'
             GROUP BY sla_job_code, j.jab_nama
             ORDER BY total_requests DESC
-        `;
+        `, [year]);
 
-        const [rows] = await db.execute(sql, [year]);
-
-        res.json({
-            success: true,
-            year: year,
-            data: rows
-        });
+        res.json({ success: true, year, data: rows });
 
     } catch (error) {
         console.error('❌ Error SLA by job:', error.message);
@@ -463,11 +369,11 @@ router.get('/sla-by-job', authenticate, isHRD, async (req, res) => {
 
 /**
  * GET /api/dashboard/sla-performance
- * Mengukur kecepatan HRD dalam menyelesaikan rekrutmen
+ * Mengukur kecepatan HRD menyelesaikan rekrutmen
  */
 router.get('/sla-performance', authenticate, isHRD, async (req, res) => {
-    const year = parseInt(req.query.year) || new Date().getFullYear(); // ✅ parseInt
-    const month = req.query.month ? parseInt(req.query.month) : null;  // ✅ parseInt
+    const year = parseInt(req.query.year) || new Date().getFullYear();
+    const month = req.query.month ? parseInt(req.query.month) : null;
 
     try {
         let whereClause = 'WHERE YEAR(sla_request_created_at) = ? AND sla_status = "COMPLETED"';
@@ -478,7 +384,7 @@ router.get('/sla-performance', authenticate, isHRD, async (req, res) => {
             params.push(month);
         }
 
-        const sql = `
+        const [rows] = await db.execute(`
             SELECT 
                 COUNT(*) as total_completed,
                 AVG(DATEDIFF(sla_calculated_at, sla_request_created_at)) as avg_days_to_approval,
@@ -489,29 +395,29 @@ router.get('/sla-performance', authenticate, isHRD, async (req, res) => {
                 SUM(CASE WHEN sla_completed_at > sla_final_target_date THEN 1 ELSE 0 END) as late_count
             FROM t_recruitment_sla
             ${whereClause}
-        `;
+        `, params);
 
-        const [rows] = await db.execute(sql, params);
         const data = rows[0];
-
-        const ontimePercentage = ((data.ontime_count / data.total_completed) * 100).toFixed(2);
+        const ontimePercentage = data.total_completed > 0
+            ? ((data.ontime_count / data.total_completed) * 100).toFixed(2)
+            : '0.00';
 
         res.json({
             success: true,
             period: month ? `${year}-${String(month).padStart(2, '0')}` : year,
-            data: data,
+            data,
             kpi: {
                 ontime_percentage: ontimePercentage + '%',
-                performance_rating: ontimePercentage >= 90 ? '🏆 Excellent' :
-                                   ontimePercentage >= 75 ? '✅ Good' :
-                                   ontimePercentage >= 60 ? '⚠️ Needs Improvement' :
-                                   '❌ Poor',
+                performance_rating:
+                    ontimePercentage >= 90 ? '🏆 Excellent' :
+                    ontimePercentage >= 75 ? '✅ Good' :
+                    ontimePercentage >= 60 ? '⚠️ Needs Improvement' : '❌ Poor',
                 avg_days_breakdown: {
                     approval_phase: Math.round(data.avg_days_to_approval) + ' hari',
                     hiring_phase: Math.round(data.avg_days_to_hire) + ' hari',
                     total: Math.round(data.avg_total_days) + ' hari'
                 },
-                vs_target: data.avg_vs_target > 0
+                vs_target: data.avg_vs_target >= 0
                     ? `✅ Lebih cepat ${Math.abs(Math.round(data.avg_vs_target))} hari dari target`
                     : `⚠️ Lebih lambat ${Math.abs(Math.round(data.avg_vs_target))} hari dari target`
             }
@@ -525,11 +431,11 @@ router.get('/sla-performance', authenticate, isHRD, async (req, res) => {
 
 /**
  * GET /api/dashboard/hrd-kpi-report
- * Laporan detail performa HRD (Khusus HRD)
+ * Laporan detail performa HRD
  */
 router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
     try {
-        const sql = `
+        const [rows] = await db.execute(`
             SELECT 
                 sla.sla_tpk_nomor,
                 j.jab_nama,
@@ -537,18 +443,13 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
                 DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) as duration_calendar,
                 sla.sla_no_show_buffer_days as buffer_noshow,
                 (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) as net_hrd_duration,
-                CONCAT(
-                    (SELECT COUNT(*) FROM tlistpelamar WHERE tlp_tpk_nomor = sla.sla_tpk_nomor AND statusterakhir = 1),
-                    '/',
-                    p.tpk_jumlah
-                ) as fulfillment
+                p.tpk_jumlah as target_count,
+                sla.sla_hired_count as hired_count
             FROM t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             WHERE sla.sla_status = 'COMPLETED'
-        `;
-
-        const [rows] = await db.execute(sql);
+        `);
 
         const processedData = rows.map(row => ({
             ...row,
@@ -563,7 +464,9 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
             data: processedData,
             summary: {
                 total_cases: processedData.length,
-                on_time_rate: (processedData.filter(d => d.kpi_status === 'EXCELLENT').length / processedData.length * 100).toFixed(2) + '%'
+                on_time_rate: processedData.length > 0
+                    ? (processedData.filter(d => d.kpi_status === 'EXCELLENT').length / processedData.length * 100).toFixed(2) + '%'
+                    : '0%'
             }
         });
 
@@ -575,7 +478,7 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
 
 /**
  * GET /api/dashboard/sla-summary
- * SLA summary untuk dashboard (semua role)
+ * SLA summary untuk semua role
  */
 router.get('/sla-summary', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
@@ -585,7 +488,7 @@ router.get('/sla-summary', authenticate, async (req, res) => {
         const whereClause = is_hrd ? '' : 'WHERE p.tpk_peminta = ?';
         const params = is_hrd ? [] : [user_kode];
 
-        const sql = `
+        const [rows] = await db.execute(`
             SELECT 
                 COUNT(*) as total_active,
                 SUM(CASE WHEN sla.sla_source = 'SYSTEM' THEN 1 ELSE 0 END) as system_adjusted,
@@ -595,15 +498,10 @@ router.get('/sla-summary', authenticate, async (req, res) => {
             FROM tpermintaankaryawan p
             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             ${whereClause}
-            AND sla.sla_status = 'CALCULATED'
-        `;
+            ${whereClause ? 'AND' : 'WHERE'} sla.sla_status = 'CALCULATED'
+        `, params);
 
-        const [rows] = await db.execute(sql, params);
-
-        res.json({
-            success: true,
-            data: rows[0]
-        });
+        res.json({ success: true, data: rows[0] });
 
     } catch (error) {
         console.error('❌ Error SLA summary:', error.message);
