@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const helmet = require('helmet');
+const slaCron = require('./src/utils/slaCron');
 
 // ✅ Set timezone SEBELUM apa pun
 process.env.TZ = 'Asia/Jakarta';
@@ -73,4 +74,12 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`📍 Environment: ${process.env.NODE_ENV}`);
+
+    // ✅ Jalankan sinkronisasi SLA otomatis saat server startup
+  try {
+    slaCron.runSlaSync();
+    console.log('🔄 SLA Synchronization Service started successfully.');
+  } catch (err) {
+    console.error('⚠️ Failed to start SLA Sync Service:', err.message);
+  }
 });
