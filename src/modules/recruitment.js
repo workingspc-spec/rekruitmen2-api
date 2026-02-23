@@ -967,4 +967,134 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
     }
 });
 
+// ============================================================
+// POST /recruitment/:tpkNomor/no-show
+// Akses  : HRD only (user_hrd = 1)
+// Body   : { bufferDays: number, keterangan: string }
+// Fungsi : Tambah buffer hari ke sla_no_show_buffer_days
+//          dan catat ke t_pkar_log sebagai audit trail.
+// ============================================================
+
+/**
+ * POST /recruitment/:tpkNomor/no-show
+ * Akses  : HRD only (user_hrd = 1)
+ * Body   : { bufferDays: number, keterangan: string }
+ * Fungsi : Tambah buffer hari ke sla_no_show_buffer_days
+ *          dan catat ke t_pkar_log sebagai bukti audit.
+ */
+router.post('/:tpkNomor/no-show', async (req, res) => {
+  const { tpkNomor } = req.params;
+  const { bufferDays, keterangan } = req.body;
+  const userKode = req.user?.user_kode;
+  const isHrd    = req.user?.user_hrd;
+
+  // Hanya HRD yang boleh mencatat no-show
+  if (!isHrd || isHrd !== 1) {
+    return res.status(403).json({
+      success: false,
+      message: 'Hanya HRD yang dapat mencatat no-show'
+    });
+  }
+
+  // Validasi input
+  if (!bufferDays || isNaN(bufferDays) || bufferDays <= 0 || bufferDays > 30) {
+    return res.status(400).json({
+      success: false,
+      message: 'bufferDays harus angka antara 1-30'
+    });
+  }
+
+  if (!keterangan || keterangan.trim().length < 5) {
+    return res.status(400).json({
+      success: false,
+      message: 'Keterangan wajib diisi minimal 5 karakter'
+    });
+  }
+
+  const conn = await db.getConnection();
+  try {
+    await conn.beginTransaction();
+
+    // 1. Ambil nilai buffer saat ini sekaligus validasi SLA ada
+    const [slaRows] = await conn.query(
+      `SELECT sla_id, sla_no_show_buffer_days, sla_status
+       FROM t_recruitment_sla
+       WHERE sla_tpk_nomor = ?`,
+      [tpkNomor]
+    );
+
+    if (slaRows.length === 0) {
+      await conn.rollback();
+      return res.status(404).json({
+        success: false,
+        message: 'SLA tidak ditemukan untuk permintaan ini'
+      });
+    }
+
+    const sla = slaRows[0];
+
+    // Tidak boleh tambah buffer jika sudah COMPLETED atau CANCELLED
+    if (sla.sla_status === 'COMPLETED' || sla.sla_status === 'CANCELLED') {
+      await conn.rollback();
+      return res.status(400).json({
+        success: false,
+        message: `Tidak dapat mencatat no-show, SLA sudah berstatus ${sla.sla_status}`
+      });
+    }
+
+    const oldBuffer = sla.sla_no_show_buffer_days || 0;
+    const newBuffer = oldBuffer + parseInt(bufferDays);
+
+    // 2. Update sla_no_show_buffer_days
+    await conn.query(
+      `UPDATE t_recruitment_sla
+       SET sla_no_show_buffer_days = ?
+       WHERE sla_tpk_nomor = ?`,
+      [newBuffer, tpkNomor]
+    );
+
+    // 3. Catat ke t_pkar_log sebagai bukti audit
+    //    field_name = 'no_show_buffer' agar mudah difilter
+    //    new_value  = gabungan angka + keterangan HRD
+    await conn.query(
+      `INSERT INTO t_pkar_log
+         (tpk_nomor, user_kode, field_name, old_value, new_value)
+       VALUES (?, ?, 'no_show_buffer', ?, ?)`,
+      [
+        tpkNomor,
+        userKode,
+        `${oldBuffer} hari`,
+        `${newBuffer} hari (+${bufferDays}) — ${keterangan.trim()}`
+      ]
+    );
+
+    await conn.commit();
+
+    return res.json({
+      success: true,
+      message: `Buffer no-show +${bufferDays} hari berhasil dicatat`,
+      data: {
+        tpkNomor,
+        oldBufferDays : oldBuffer,
+        newBufferDays : newBuffer,
+        addedDays     : parseInt(bufferDays),
+        keterangan    : keterangan.trim(),
+        recordedBy    : userKode,
+        recordedAt    : new Date().toISOString()
+      }
+    });
+
+  } catch (err) {
+    await conn.rollback();
+    console.error('[POST no-show] Error:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Gagal mencatat no-show',
+      error: err.message
+    });
+  } finally {
+    conn.release();
+  }
+});
+
 module.exports = router;
