@@ -4,7 +4,7 @@ const db = require('../config/db');
 /**
  * LOGIKA SINKRONISASI SLA (BACKGROUND TASK)
  * Berjalan setiap 5 menit.
- * Mengambil data dari tlistpelamar (Federated) dan update ke t_recruitment_sla (Lokal)
+ * ✅ OPTIMIZED: Tidak menggunakan Correlated Subquery untuk Federated Table
  */
 const runSlaSync = async () => {
     let connection;
@@ -12,32 +12,56 @@ const runSlaSync = async () => {
         connection = await db.getConnection();
         await connection.beginTransaction();
 
-        // 1. Sinkronisasi hired_count
-        await connection.execute(`
-            UPDATE t_recruitment_sla sla
-            SET sla.sla_hired_count = (
-                SELECT COUNT(*) 
-                FROM tlistpelamar tlp 
-                WHERE tlp.tlp_tpk_nomor = sla.sla_tpk_nomor 
-                AND tlp.statusterakhir = 1
-            )
-            WHERE sla.sla_status IN ('PENDING', 'CALCULATED')
-        `);
+        // 1. Cari tiket (tpk_nomor) yang SLA-nya masih berjalan (belum complete/cancelled)
+        const [activeSlas] = await connection.query(
+            `SELECT sla_tpk_nomor FROM t_recruitment_sla WHERE sla_status IN ('PENDING', 'CALCULATED')`
+        );
 
-        // 2. Auto-complete jika target terpenuhi
-        await connection.execute(`
-            UPDATE t_recruitment_sla sla
-            JOIN tpermintaankaryawan tpk ON sla.sla_tpk_nomor = tpk.tpk_nomor
-            SET 
-                sla.sla_status = 'COMPLETED',
-                sla.sla_completed_at = NOW(),
-                sla.sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] System: Sync completed.')
-            WHERE sla.sla_hired_count >= tpk.tpk_jumlah 
-            AND sla.sla_status = 'CALCULATED'
-        `);
+        if (activeSlas.length > 0) {
+            const tpkNomors = activeSlas.map(s => s.sla_tpk_nomor);
+            
+            // Buat placeholders (?, ?, ?) sesuai jumlah tiket aktif
+            const placeholders = tpkNomors.map(() => '?').join(',');
+
+            // 2. Tarik jumlah hired HANYA untuk tiket yang aktif
+            // Ini sangat ringan untuk Federated Engine karena difilter dengan IN (...)
+            const [hiredData] = await connection.query(`
+                SELECT tlp_tpk_nomor, COUNT(*) as total_hired 
+                FROM tlistpelamar 
+                WHERE statusterakhir = 1 AND tlp_tpk_nomor IN (${placeholders})
+                GROUP BY tlp_tpk_nomor
+            `, tpkNomors);
+
+            // Mapping hasil query ke object/dictionary untuk akses cepat di Node.js
+            const hiredMap = {};
+            hiredData.forEach(row => { 
+                hiredMap[row.tlp_tpk_nomor] = row.total_hired; 
+            });
+
+            // 3. Update tabel SLA satu per satu dengan data terbaru
+            for (const sla of activeSlas) {
+                const hiredCount = hiredMap[sla.sla_tpk_nomor] || 0;
+                await connection.query(
+                    `UPDATE t_recruitment_sla SET sla_hired_count = ? WHERE sla_tpk_nomor = ?`,
+                    [hiredCount, sla.sla_tpk_nomor]
+                );
+            }
+
+            // 4. Auto-complete jika target terpenuhi
+            await connection.query(`
+                UPDATE t_recruitment_sla sla
+                JOIN tpermintaankaryawan tpk ON sla.sla_tpk_nomor = tpk.tpk_nomor
+                SET 
+                    sla.sla_status = 'COMPLETED',
+                    sla.sla_completed_at = NOW(),
+                    sla.sla_notes = CONCAT(COALESCE(sla.sla_notes,''), '\n[', NOW(), '] System: Sync completed.')
+                WHERE sla.sla_hired_count >= tpk.tpk_jumlah 
+                AND sla.sla_status = 'CALCULATED'
+            `);
+        }
 
         await connection.commit();
-        console.log(`[${new Date().toLocaleString()}] SLA Sync Success`);
+        console.log(`[${new Date().toLocaleString()}] SLA Sync Success. Validated ${activeSlas.length} active requests.`);
     } catch (error) {
         if (connection) await connection.rollback();
         console.error('SLA Sync Error:', error.message);

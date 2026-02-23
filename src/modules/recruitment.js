@@ -618,16 +618,15 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                 [data.tpk_jab_kode]
             );
 
-            if (masterData.length === 0) {
-                await connection.rollback();
-                connection.release();
-                return res.status(500).json({
-                    success: false,
-                    message: `Master lead time untuk jabatan ${data.tpk_jab_kode} tidak ditemukan. Hubungi admin.`
-                });
-            }
+            // ✅ FIX: Jika HRD lupa mengisi master lead time, gunakan fallback 14 hari
+            // Mencegah approval atasan error dan nyangkut!
+            let master = { jlt_min_days: 14, jlt_max_days: 30, jlt_is_flexible: 0 };
 
-            const master = masterData[0];
+            if (masterData.length === 0) {
+                console.warn(`[WARNING] Master lead time untuk ${data.tpk_jab_kode} tidak ditemukan. Menggunakan fallback 14 hari.`);
+            } else {
+                master = masterData[0];
+            }
 
             const approvedAt = new Date();
             approvedAt.setHours(0, 0, 0, 0);
@@ -1074,21 +1073,9 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
     }
 });
 
-
-// ============================================================
-// POST /recruitment/:tpkNomor/no-show
-// Akses  : HRD only (user_hrd = 1)
-// Body   : { bufferDays: number, keterangan: string }
-// Fungsi : Tambah buffer hari ke sla_no_show_buffer_days
-//          dan catat ke t_pkar_log sebagai audit trail.
-// ============================================================
-
 /**
  * POST /recruitment/:tpkNomor/no-show
  * Akses  : HRD only (user_hrd = 1)
- * Body   : { bufferDays: number, keterangan: string }
- * Fungsi : Tambah buffer hari ke sla_no_show_buffer_days
- *          dan catat ke t_pkar_log sebagai bukti audit.
  */
 router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
   const { tpkNomor } = req.params;
@@ -1096,110 +1083,54 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
   const userKode = req.user?.user_kode;
   const isHrd    = req.user?.user_hrd;
 
-  // Hanya HRD yang boleh mencatat no-show
-  if (!isHrd || isHrd !== 1) {
-    return res.status(403).json({
-      success: false,
-      message: 'Hanya HRD yang dapat mencatat no-show'
-    });
-  }
-
-  // Validasi input
-  if (!bufferDays || isNaN(bufferDays) || bufferDays <= 0 || bufferDays > 30) {
-    return res.status(400).json({
-      success: false,
-      message: 'bufferDays harus angka antara 1-30'
-    });
-  }
-
-  if (!keterangan || keterangan.trim().length < 5) {
-    return res.status(400).json({
-      success: false,
-      message: 'Keterangan wajib diisi minimal 5 karakter'
-    });
-  }
+  if (!isHrd || isHrd !== 1) { return res.status(403).json({ success: false, message: 'Hanya HRD' }); }
+  if (!bufferDays || isNaN(bufferDays) || bufferDays <= 0 || bufferDays > 30) { return res.status(400).json({ success: false, message: 'bufferDays 1-30' }); }
+  if (!keterangan || keterangan.trim().length < 5) { return res.status(400).json({ success: false, message: 'Keterangan minimal 5 karakter' }); }
 
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
 
-    // 1. Ambil nilai buffer saat ini sekaligus validasi SLA ada
     const [slaRows] = await conn.query(
-      `SELECT sla_id, sla_no_show_buffer_days, sla_status
-       FROM t_recruitment_sla
-       WHERE sla_tpk_nomor = ?`,
-      [tpkNomor]
+      `SELECT sla_id, sla_no_show_buffer_days, sla_status, sla_hired_count
+       FROM t_recruitment_sla WHERE sla_tpk_nomor = ?`, [tpkNomor]
     );
 
-    if (slaRows.length === 0) {
-      await conn.rollback();
-      return res.status(404).json({
-        success: false,
-        message: 'SLA tidak ditemukan untuk permintaan ini'
-      });
-    }
-
+    if (slaRows.length === 0) { await conn.rollback(); return res.status(404).json({ success: false, message: 'SLA tidak ditemukan' }); }
     const sla = slaRows[0];
 
-    // Tidak boleh tambah buffer jika sudah COMPLETED atau CANCELLED
-    if (sla.sla_status === 'COMPLETED' || sla.sla_status === 'CANCELLED') {
+    // ✅ FIX: Hanya blokir jika Cancelled. Jika COMPLETED, izinkan untuk "Re-Open" tiket
+    if (sla.sla_status === 'CANCELLED') {
       await conn.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Tidak dapat mencatat no-show, SLA sudah berstatus ${sla.sla_status}`
-      });
+      return res.status(400).json({ success: false, message: `Tidak dapat mencatat no-show, SLA sudah CANCELLED` });
     }
 
     const oldBuffer = sla.sla_no_show_buffer_days || 0;
     const newBuffer = oldBuffer + parseInt(bufferDays);
 
-    // 2. Update sla_no_show_buffer_days
+    // ✅ FIX: Jika tiket sudah terlanjur tertutup (COMPLETED), kita BUKA LAGI
+    let statusUpdateQuery = "";
+    if (sla.sla_status === 'COMPLETED') {
+       // Ubah status jadi berjalan (CALCULATED), hapus tanggal selesai, kurangi jumlah orang yang hire (-1)
+       statusUpdateQuery = `, sla_status = 'CALCULATED', sla_completed_at = NULL, sla_hired_count = GREATEST(0, sla_hired_count - 1)`;
+    }
+
     await conn.query(
       `UPDATE t_recruitment_sla
-       SET sla_no_show_buffer_days = ?
-       WHERE sla_tpk_nomor = ?`,
-      [newBuffer, tpkNomor]
+       SET sla_no_show_buffer_days = ? ${statusUpdateQuery}
+       WHERE sla_tpk_nomor = ?`, [newBuffer, tpkNomor]
     );
 
-    // 3. Catat ke t_pkar_log sebagai bukti audit
-    //    field_name = 'no_show_buffer' agar mudah difilter
-    //    new_value  = gabungan angka + keterangan HRD
     await conn.query(
-      `INSERT INTO t_pkar_log
-         (tpk_nomor, user_kode, field_name, old_value, new_value)
-       VALUES (?, ?, 'no_show_buffer', ?, ?)`,
-      [
-        tpkNomor,
-        userKode,
-        `${oldBuffer} hari`,
-        `${newBuffer} hari (+${bufferDays}) — ${keterangan.trim()}`
-      ]
+      `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value) VALUES (?, ?, 'no_show_buffer', ?, ?)`,
+      [tpkNomor, userKode, `${oldBuffer} hari`, `${newBuffer} hari (+${bufferDays}) — ${keterangan.trim()}`]
     );
 
     await conn.commit();
-
-    return res.json({
-      success: true,
-      message: `Buffer no-show +${bufferDays} hari berhasil dicatat`,
-      data: {
-        tpkNomor,
-        oldBufferDays : oldBuffer,
-        newBufferDays : newBuffer,
-        addedDays     : parseInt(bufferDays),
-        keterangan    : keterangan.trim(),
-        recordedBy    : userKode,
-        recordedAt    : new Date().toISOString()
-      }
-    });
+    return res.json({ success: true, message: `Buffer no-show berhasil dicatat. ${sla.sla_status === 'COMPLETED' ? 'Tiket kembali dibuka (In Progress).' : ''}` });
 
   } catch (err) {
-    await conn.rollback();
-    console.error('[POST no-show] Error:', err);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal mencatat no-show',
-      error: err.message
-    });
+    await conn.rollback(); res.status(500).json({ success: false, message: 'Gagal mencatat no-show', error: err.message });
   } finally {
     conn.release();
   }
