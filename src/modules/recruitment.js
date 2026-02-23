@@ -50,10 +50,7 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
         const { min_days, is_flexible } = rows[0];
         if (is_flexible === 1) return { valid: true };
 
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-
-        const minDateObj = addWorkdays(tomorrow, min_days);
+        const minDateObj = addWorkdays(today, min_days);
         const minDateStr = formatDateSafe(minDateObj);
 
         if (requestedDate < minDateObj) {
@@ -647,16 +644,20 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
             if (master.jlt_is_flexible === 1) {
                 finalTargetDate = requestedDate;
-                slaSource       = 'FLEXIBLE';
+                slaSource = 'FLEXIBLE';
             } else {
                 systemFloorDate = addWorkdays(approvedAt, master.jlt_min_days);
 
                 if (systemFloorDate.getTime() > requestedDate.getTime()) {
+                    // User minta terlalu cepat (misal: minta tgl 24 padahal sistem butuh min sampai tgl 26)
                     finalTargetDate = systemFloorDate;
-                    slaSource       = 'SYSTEM';
+                    slaSource = 'SYSTEM';
                 } else {
+                    // User minta tgl 27, sistem sanggup tgl 26.
+                    // Kita samakan floor_date ke 27 agar timeline di UI sinkron (sejajar).
+                    systemFloorDate = requestedDate; 
                     finalTargetDate = requestedDate;
-                    slaSource       = 'USER';
+                    slaSource = 'USER';
                 }
             }
 
@@ -967,6 +968,113 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
     }
 });
 
+router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
+    const { tpkNomor } = req.params;
+    const { isEditable, keterangan } = req.body;
+    const userKode = req.user.user_kode;
+
+    if (isEditable === undefined || (isEditable !== 0 && isEditable !== 1)) {
+        return res.status(400).json({
+            success: false,
+            message: 'isEditable harus bernilai 0 atau 1'
+        });
+    }
+
+    if (isEditable === 1 && (!keterangan || keterangan.trim().length < 5)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Keterangan wajib diisi minimal 5 karakter saat membuka izin edit'
+        });
+    }
+
+    const conn = await db.getConnection();
+    try {
+        await conn.beginTransaction();
+
+        const [slaRows] = await conn.query(
+            `SELECT sla_id, sla_is_editable, sla_status
+             FROM t_recruitment_sla
+             WHERE sla_tpk_nomor = ?`,
+            [tpkNomor]
+        );
+
+        if (slaRows.length === 0) {
+            await conn.rollback();
+            return res.status(404).json({
+                success: false,
+                message: 'SLA tidak ditemukan'
+            });
+        }
+
+        const sla = slaRows[0];
+
+        if (sla.sla_status !== 'CALCULATED') {
+            await conn.rollback();
+            return res.status(400).json({
+                success: false,
+                message: `Tidak dapat mengubah izin edit, SLA berstatus ${sla.sla_status}`
+            });
+        }
+
+        await conn.query(
+            `UPDATE t_recruitment_sla SET sla_is_editable = ? WHERE sla_tpk_nomor = ?`,
+            [isEditable, tpkNomor]
+        );
+
+        const actionLabel = isEditable === 1 ? 'edit_opened' : 'edit_closed';
+        const logValue = isEditable === 1
+            ? `Izin edit dibuka oleh HRD — ${(keterangan || '').trim()}`
+            : `Izin edit ditutup oleh HRD`;
+
+        await conn.query(
+            `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
+             VALUES (?, ?, ?, ?, ?)`,
+            [
+                tpkNomor,
+                userKode,
+                actionLabel,
+                sla.sla_is_editable === 1 ? 'editable' : 'locked',
+                isEditable === 1 ? 'editable' : 'locked'
+            ]
+        );
+
+        if (isEditable === 1 && keterangan) {
+            await conn.query(
+                `UPDATE t_recruitment_sla
+                 SET sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] HRD minta update tanggal: ', ?)
+                 WHERE sla_tpk_nomor = ?`,
+                [keterangan.trim(), tpkNomor]
+            );
+        }
+
+        await conn.commit();
+
+        return res.json({
+            success: true,
+            message: isEditable === 1
+                ? 'Izin edit tanggal berhasil dibuka. Peminta dapat mengubah tanggal.'
+                : 'Izin edit tanggal berhasil ditutup.',
+            data: {
+                tpkNomor,
+                isEditable,
+                updatedBy: userKode
+            }
+        });
+
+    } catch (err) {
+        await conn.rollback();
+        console.error('[PATCH editable] Error:', err);
+        return res.status(500).json({
+            success: false,
+            message: 'Gagal mengubah izin edit',
+            error: err.message
+        });
+    } finally {
+        conn.release();
+    }
+});
+
+
 // ============================================================
 // POST /recruitment/:tpkNomor/no-show
 // Akses  : HRD only (user_hrd = 1)
@@ -982,7 +1090,7 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
  * Fungsi : Tambah buffer hari ke sla_no_show_buffer_days
  *          dan catat ke t_pkar_log sebagai bukti audit.
  */
-router.post('/:tpkNomor/no-show', async (req, res) => {
+router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
   const { tpkNomor } = req.params;
   const { bufferDays, keterangan } = req.body;
   const userKode = req.user?.user_kode;

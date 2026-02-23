@@ -189,10 +189,18 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
 
         // Edit history dari audit log
         const [editHistory] = await db.execute(
-            `SELECT field_name, old_value, new_value, user_kode, created_at
-             FROM t_pkar_log
-             WHERE tpk_nomor = ?
-             ORDER BY created_at DESC`,
+            `SELECT 
+                l.log_id,
+                l.field_name,
+                l.old_value,
+                l.new_value,
+                l.user_kode,
+                k.kar_nama AS user_nama,
+                DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+             FROM t_pkar_log l
+             LEFT JOIN tkaryawan k ON k.kar_Nik = l.user_kode
+             WHERE l.tpk_nomor = ?
+             ORDER BY l.created_at DESC`,
             [tpk_nomor]
         );
 
