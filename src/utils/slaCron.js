@@ -1,5 +1,5 @@
 const cron = require('node-cron');
-const db = require('../config/db');
+const db   = require('../config/db');
 
 /**
  * LOGIKA SINKRONISASI SLA (BACKGROUND TASK)
@@ -18,13 +18,11 @@ const runSlaSync = async () => {
         );
 
         if (activeSlas.length > 0) {
-            const tpkNomors = activeSlas.map(s => s.sla_tpk_nomor);
-            
-            // Buat placeholders (?, ?, ?) sesuai jumlah tiket aktif
-            const placeholders = tpkNomors.map(() => '?').join(',');
+            const tpkNomors     = activeSlas.map(s => s.sla_tpk_nomor);
+            const placeholders  = tpkNomors.map(() => '?').join(',');
 
             // 2. Tarik jumlah hired HANYA untuk tiket yang aktif
-            // Ini sangat ringan untuk Federated Engine karena difilter dengan IN (...)
+            //    Ringan untuk Federated Engine karena difilter dengan IN (...)
             const [hiredData] = await connection.query(`
                 SELECT tlp_tpk_nomor, COUNT(*) as total_hired 
                 FROM tlistpelamar 
@@ -34,57 +32,70 @@ const runSlaSync = async () => {
 
             // Mapping hasil query ke object/dictionary untuk akses cepat di Node.js
             const hiredMap = {};
-            hiredData.forEach(row => { 
-                hiredMap[row.tlp_tpk_nomor] = row.total_hired; 
+            hiredData.forEach(row => {
+                hiredMap[row.tlp_tpk_nomor] = row.total_hired;
             });
 
-            // 3. Update tabel SLA satu per satu dengan data terbaru
-            for (const sla of activeSlas) {
-                const hiredCount = hiredMap[sla.sla_tpk_nomor] || 0;
-                await connection.query(
-                    `UPDATE t_recruitment_sla SET sla_hired_count = ? WHERE sla_tpk_nomor = ?`,
-                    [hiredCount, sla.sla_tpk_nomor]
-                );
-            }
+            // 3. ✅ FIX: Bulk UPDATE dengan CASE WHEN — 1 query, bukan N query dalam loop
+            const caseStatements = activeSlas.map(() => `WHEN ? THEN ?`).join(' ');
+            const flatValues     = activeSlas.flatMap(sla => [
+                sla.sla_tpk_nomor,
+                hiredMap[sla.sla_tpk_nomor] || 0
+            ]);
+
+            await connection.query(`
+                UPDATE t_recruitment_sla
+                SET sla_hired_count = CASE sla_tpk_nomor ${caseStatements} END
+                WHERE sla_tpk_nomor IN (${placeholders})
+            `, [...flatValues, ...tpkNomors]);
 
             // 4. Auto-complete jika target terpenuhi
-// 4. Auto-complete jika target terpenuhi
-            // ✅ FIX: Gunakan query SELECT dulu agar kita tahu TPK mana saja yang akan ditutup, 
-            // sehingga kita bisa mencatatnya di log riwayat (t_pkar_log).
+            //    ✅ FIX: Gunakan query SELECT dulu agar kita tahu TPK mana saja yang akan
+            //    ditutup, sehingga bisa dicatat di log riwayat (t_pkar_log).
+            //    ✅ FIX: Filter IN (tpkNomors) agar tidak scan seluruh tabel saat data besar.
             const [toComplete] = await connection.query(`
                 SELECT sla.sla_tpk_nomor
                 FROM t_recruitment_sla sla
                 JOIN tpermintaankaryawan tpk ON sla.sla_tpk_nomor = tpk.tpk_nomor
                 WHERE sla.sla_hired_count >= tpk.tpk_jumlah 
-                AND sla.sla_status = 'CALCULATED'
-            `);
+                  AND sla.sla_status      = 'CALCULATED'
+                  AND sla.sla_tpk_nomor  IN (${placeholders})
+            `, tpkNomors);
 
             if (toComplete.length > 0) {
-                const tpksToClose = toComplete.map(row => row.sla_tpk_nomor);
-                const placeholdersClose = tpksToClose.map(() => '?').join(',');
+                const tpksToClose        = toComplete.map(row => row.sla_tpk_nomor);
+                const placeholdersClose  = tpksToClose.map(() => '?').join(',');
 
-                // Update Status SLA
+                // Update status SLA → COMPLETED
                 await connection.query(`
                     UPDATE t_recruitment_sla 
                     SET 
-                        sla_status = 'COMPLETED',
+                        sla_status      = 'COMPLETED',
                         sla_completed_at = NOW(),
                         sla_is_editable = 0,
-                        sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] System: Target terpenuhi, SLA otomatis ditutup.')
+                        sla_notes       = CONCAT(
+                            COALESCE(sla_notes, ''),
+                            '\n[', NOW(), '] System: Target terpenuhi, SLA otomatis ditutup.'
+                        )
                     WHERE sla_tpk_nomor IN (${placeholdersClose})
                 `, tpksToClose);
 
                 // Insert ke Audit Log agar muncul di Riwayat Perubahan Frontend
-                const logValues = tpksToClose.map(tpk => [tpk, 'SYSTEM', 'status_sla', 'CALCULATED', 'COMPLETED (Auto-Sync)']);
+                const logValues = tpksToClose.map(tpk => [
+                    tpk, 'SYSTEM', 'status_sla', 'CALCULATED', 'COMPLETED (Auto-Sync)'
+                ]);
                 await connection.query(`
                     INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
                     VALUES ?
                 `, [logValues]);
             }
-        }    
+        }
 
         await connection.commit();
-        console.log(`[${new Date().toLocaleString()}] SLA Sync Success. Validated ${activeSlas.length} active requests.`);
+        console.log(
+            `[${new Date().toLocaleString()}] SLA Sync Success.`,
+            `Validated ${activeSlas.length} active requests.`
+        );
     } catch (error) {
         if (connection) await connection.rollback();
         console.error('SLA Sync Error:', error.message);
