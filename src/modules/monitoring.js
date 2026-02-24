@@ -58,6 +58,8 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 DATEDIFF(sla.sla_final_target_date, CURDATE()) as days_remaining,
                 p.tpk_jumlah as target_count,
                 
+                ROUND((COALESCE(sla.sla_hired_count, 0) / NULLIF(p.tpk_jumlah, 0)) * 100) AS progress_percentage,
+
                 CASE 
                     WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
