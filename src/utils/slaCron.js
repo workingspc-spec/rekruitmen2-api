@@ -48,17 +48,40 @@ const runSlaSync = async () => {
             }
 
             // 4. Auto-complete jika target terpenuhi
-            await connection.query(`
-                UPDATE t_recruitment_sla sla
+// 4. Auto-complete jika target terpenuhi
+            // ✅ FIX: Gunakan query SELECT dulu agar kita tahu TPK mana saja yang akan ditutup, 
+            // sehingga kita bisa mencatatnya di log riwayat (t_pkar_log).
+            const [toComplete] = await connection.query(`
+                SELECT sla.sla_tpk_nomor
+                FROM t_recruitment_sla sla
                 JOIN tpermintaankaryawan tpk ON sla.sla_tpk_nomor = tpk.tpk_nomor
-                SET 
-                    sla.sla_status = 'COMPLETED',
-                    sla.sla_completed_at = NOW(),
-                    sla.sla_notes = CONCAT(COALESCE(sla.sla_notes,''), '\n[', NOW(), '] System: Sync completed.')
                 WHERE sla.sla_hired_count >= tpk.tpk_jumlah 
                 AND sla.sla_status = 'CALCULATED'
             `);
-        }
+
+            if (toComplete.length > 0) {
+                const tpksToClose = toComplete.map(row => row.sla_tpk_nomor);
+                const placeholdersClose = tpksToClose.map(() => '?').join(',');
+
+                // Update Status SLA
+                await connection.query(`
+                    UPDATE t_recruitment_sla 
+                    SET 
+                        sla_status = 'COMPLETED',
+                        sla_completed_at = NOW(),
+                        sla_is_editable = 0,
+                        sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] System: Target terpenuhi, SLA otomatis ditutup.')
+                    WHERE sla_tpk_nomor IN (${placeholdersClose})
+                `, tpksToClose);
+
+                // Insert ke Audit Log agar muncul di Riwayat Perubahan Frontend
+                const logValues = tpksToClose.map(tpk => [tpk, 'SYSTEM', 'status_sla', 'CALCULATED', 'COMPLETED (Auto-Sync)']);
+                await connection.query(`
+                    INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
+                    VALUES ?
+                `, [logValues]);
+            }
+        }    
 
         await connection.commit();
         console.log(`[${new Date().toLocaleString()}] SLA Sync Success. Validated ${activeSlas.length} active requests.`);

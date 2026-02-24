@@ -93,14 +93,16 @@ router.get('/sla-status', authenticate, async (req, res) => {
         const [rows] = await db.execute(sql, finalParams);
 
         const summary = {
-            // ✅ UBAH BARIS INI: Hanya hitung yang masih berjalan (CALCULATED)
-            total_active: rows.filter(r => r.sla_status === 'CALCULATED').length, 
-            
+            total_active: rows.filter(r => r.sla_status === 'CALCULATED').length,
             need_update: rows.filter(r => r.sla_is_editable === 1).length,
             overdue: rows.filter(r => r.ui_status_tag === 'OVERDUE').length,
             critical: rows.filter(r => r.ui_status_tag === 'CRITICAL').length,
             warning: rows.filter(r => r.ui_status_tag === 'WARNING').length,
-            on_progress: rows.filter(r => r.ui_status_tag === 'ON_PROGRESS').length
+            on_progress: rows.filter(r => r.ui_status_tag === 'ON_PROGRESS').length,
+            
+            // ✅ TAMBAHKAN 2 BARIS INI AGAR ANGKA DI RINGKASAN FRONTEND MUNCUL:
+            total_hired: rows.reduce((sum, r) => sum + (Number(r.sla_hired_count) || 0), 0),
+            total_target: rows.reduce((sum, r) => sum + (Number(r.target_count) || 0), 0)
         };
 
         if (user_hrd !== 1) {
