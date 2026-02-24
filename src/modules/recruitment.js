@@ -869,22 +869,29 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
  */
 router.post('/complete', authenticate, isHRD, async (req, res) => {
     const { tpk_nomor, hired_count } = req.body;
+    const userKode = req.user.user_kode; // Ambil kode HRD yang menekan tombol
 
     if (!tpk_nomor) {
         return res.status(400).json({ success: false, message: 'tpk_nomor diperlukan' });
     }
 
+    const conn = await db.getConnection();
+
     try {
-        const [check] = await db.execute(
-            'SELECT sla_status, sla_hired_count FROM t_recruitment_sla WHERE sla_tpk_nomor = ?',
+        await conn.beginTransaction();
+
+        const [check] = await conn.execute(
+            'SELECT sla_status, sla_hired_count FROM t_recruitment_sla WHERE sla_tpk_nomor = ? FOR UPDATE',
             [tpk_nomor]
         );
 
         if (check.length === 0) {
+            await conn.rollback();
             return res.status(404).json({ success: false, message: 'SLA tidak ditemukan' });
         }
 
         if (check[0].sla_status === 'COMPLETED') {
+            await conn.rollback();
             return res.status(400).json({ success: false, message: 'Permintaan sudah selesai' });
         }
 
@@ -892,7 +899,8 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
             ? hired_count
             : check[0].sla_hired_count;
 
-        await db.execute(
+        // 1. Update SLA
+        await conn.execute(
             `UPDATE t_recruitment_sla
              SET sla_status       = 'COMPLETED',
                  sla_completed_at = NOW(),
@@ -902,11 +910,22 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
             [finalHiredCount, tpk_nomor]
         );
 
+        // 2. Insert Log agar muncul di "Riwayat Perubahan"
+        await conn.execute(
+            `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value) 
+             VALUES (?, ?, 'status_sla', 'CALCULATED', 'COMPLETED (Tutup Manual)')`,
+            [tpk_nomor, userKode]
+        );
+
+        await conn.commit();
         res.json({ success: true, message: 'Permintaan berhasil ditutup' });
 
     } catch (error) {
+        await conn.rollback();
         console.error('❌ Error complete:', error.message);
         res.status(500).json({ success: false, message: error.message });
+    } finally {
+        conn.release();
     }
 });
 

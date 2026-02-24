@@ -93,7 +93,9 @@ router.get('/sla-status', authenticate, async (req, res) => {
         const [rows] = await db.execute(sql, finalParams);
 
         const summary = {
-            total_active: rows.length,
+            // ✅ UBAH BARIS INI: Hanya hitung yang masih berjalan (CALCULATED)
+            total_active: rows.filter(r => r.sla_status === 'CALCULATED').length, 
+            
             need_update: rows.filter(r => r.sla_is_editable === 1).length,
             overdue: rows.filter(r => r.ui_status_tag === 'OVERDUE').length,
             critical: rows.filter(r => r.ui_status_tag === 'CRITICAL').length,
