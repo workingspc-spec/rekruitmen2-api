@@ -904,6 +904,7 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
             `UPDATE t_recruitment_sla
              SET sla_status       = 'COMPLETED',
                  sla_completed_at = NOW(),
+                 sla_is_editable  = 0,
                  sla_hired_count  = ?,
                  sla_notes        = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Ditutup manual oleh HRD.')
              WHERE sla_tpk_nomor = ?`,
@@ -1153,6 +1154,77 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
   } finally {
     conn.release();
   }
+});
+
+// =========================================================================
+// GET HIRED CANDIDATES (Daftar Kandidat Diterima)
+// =========================================================================
+router.get('/:tpkNomor/hired-candidates', async (req, res) => {
+    try {
+        const { tpkNomor } = req.params;
+        const [rows] = await db.query(`
+            SELECT 
+                lp.tlp_rkt_nomor AS rkt_nomor, 
+                r.rkt_nama AS nama, 
+                lp.tgl_diterima 
+            FROM tlistpelamar lp
+            JOIN trekruitmen r ON lp.tlp_rkt_nomor = r.rkt_nomor
+            WHERE lp.tlp_tpk_nomor = ? AND lp.statusterakhir = 1
+        `, [tpkNomor]);
+
+        res.json({ success: true, data: rows });
+    } catch (error) {
+        console.error('Error fetching hired candidates:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// =========================================================================
+// CANCEL CANDIDATE (Batalkan / No-Show langsung ke database legacy)
+// =========================================================================
+router.post('/:tpkNomor/cancel-candidate', async (req, res) => {
+    const connection = await db.getConnection();
+    try {
+        await connection.beginTransaction();
+        const { tpkNomor } = req.params;
+        const { rktNomor, bufferDays, keterangan } = req.body;
+        const userKode = req.user ? req.user.userKode : 'SYSTEM';
+
+        // 1. UPDATE Legacy Database: Ubah status pelamar jadi 2 (Batal/Tidak Diterima)
+        // (Trigger tlistpelamar_after_update akan otomatis mengisi tgl_tidakditerima dan mengupdate trekruitmen)
+        await connection.query(`
+            UPDATE tlistpelamar 
+            SET statusterakhir = 2 
+            WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?
+        `, [tpkNomor, rktNomor]);
+
+        // 2. UPDATE SLA: Kurangi hired count, tambah buffer, kembalikan ke CALCULATED
+        const [updateSlaResult] = await connection.query(`
+            UPDATE t_recruitment_sla 
+            SET 
+                sla_hired_count = GREATEST(0, sla_hired_count - 1),
+                sla_status = 'CALCULATED',
+                sla_no_show_buffer_days = sla_no_show_buffer_days + ?,
+                sla_completed_at = NULL
+            WHERE sla_tpk_nomor = ?
+        `, [bufferDays, tpkNomor]);
+
+        // 3. Catat Log
+        const logNotes = `Kandidat ${rktNomor} dibatalkan (No-Show). Buffer +${bufferDays} hari ditambahkan. Alasan: ${keterangan}`;
+        await connection.query(`
+            INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
+            VALUES (?, ?, 'cancel_candidate', 'Hired', ?)
+        `, [tpkNomor, userKode, logNotes]);
+
+        await connection.commit();
+        res.json({ success: true, message: 'Kandidat berhasil dibatalkan', data: { addedDays: bufferDays } });
+    } catch (error) {
+        await connection.rollback();
+        console.error('Error cancelling candidate:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    } finally {
+        connection.release();
+    }
 });
 
 module.exports = router;
