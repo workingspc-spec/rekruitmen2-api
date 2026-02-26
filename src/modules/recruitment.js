@@ -576,12 +576,14 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             return res.status(400).json({ success: false, message: 'Action tidak valid. Gunakan APPROVE atau REJECT.' });
         }
 
+        // SESUDAH — tambah p.tpk_jumlah
         const [checkRows] = await connection.execute(
             `SELECT
                 p.tpk_approveatasan,
                 p.tpk_tanggal,
                 p.tpk_tgl_butuh,
                 p.tpk_jab_kode,
+                p.tpk_jumlah,          /* ✅ TAMBAHAN */
                 k.kar_nik_atasan,
                 sla.sla_id,
                 sla.sla_original_requested_date,
@@ -626,14 +628,34 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                 [data.tpk_jab_kode]
             );
 
-            // ✅ FIX: Jika HRD lupa mengisi master lead time, gunakan fallback 14 hari
-            // Mencegah approval atasan error dan nyangkut!
+            // SESUDAH — tambahkan logika extraDays setelah master didapat
             let master = { jlt_min_days: 14, jlt_max_days: 30, jlt_is_flexible: 0 };
 
             if (masterData.length === 0) {
                 console.warn(`[WARNING] Master lead time untuk ${data.tpk_jab_kode} tidak ditemukan. Menggunakan fallback 14 hari.`);
             } else {
                 master = masterData[0];
+            }
+
+            // ✅ BULK REQUEST BUFFER — Tambah hari ekstra jika permintaan > 1 orang
+            const jumlahDiminta = data.tpk_jumlah || 1;
+            let extraDays = 0;
+
+            if (jumlahDiminta > 1) {
+                if (jumlahDiminta <= 3) {
+                    extraDays = 3;                             // 2–3 orang: +3 hari
+                } else if (jumlahDiminta <= 5) {
+                    extraDays = 6;                             // 4–5 orang: +6 hari
+                } else {
+                    extraDays = 6 + (jumlahDiminta - 5);      // >5 orang: +6 + 1/orang
+                }
+            }
+
+            // Terapkan hanya untuk jabatan non-fleksibel
+            if (master.jlt_is_flexible !== 1 && extraDays > 0) {
+                master.jlt_min_days += extraDays;
+                master.jlt_max_days += extraDays;
+                console.log(`[BULK BUFFER] ${tpk_nomor} — ${jumlahDiminta} orang, extra +${extraDays} hari. Min: ${master.jlt_min_days}, Max: ${master.jlt_max_days}`);
             }
 
             const approvedAt = new Date();
@@ -669,9 +691,14 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             }
 
             const diffDays      = countWorkdays(requestedDate, finalTargetDate);
-            const approvalNote  = approvalDelayDays > 0
+            const approvalNote = approvalDelayDays > 0
                 ? `Approval atasan terlambat ${approvalDelayDays} hari kerja.`
                 : `Approval atasan tepat waktu.`;
+
+            // ✅ Catatan transparansi untuk bulk request
+            const bulkNote = extraDays > 0
+                ? ` (Penambahan +${extraDays} hari untuk pencarian massal ${jumlahDiminta} orang).`
+                : '';
 
             await connection.execute(
                 `UPDATE t_recruitment_sla SET
@@ -701,7 +728,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                     slaSource,
                     approvalDelayDays,
                     diffDays,
-                    approvalNote,
+                    approvalNote + bulkNote,
                     tpk_nomor
                 ]
             );
