@@ -107,7 +107,7 @@ router.get('/stats', authenticate, async (req, res) => {
                     SUM(CASE WHEN sla_status = 'CALCULATED' THEN 1 ELSE 0 END) as calculated,
                     SUM(CASE WHEN sla_status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN sla_is_editable = 1 THEN 1 ELSE 0 END) as need_user_update,
-                    SUM(CASE WHEN sla_status = 'CALCULATED' AND CURDATE() > sla_final_target_date THEN 1 ELSE 0 END) as overdue
+                    SUM(CASE WHEN sla_status = 'CALCULATED' AND CURDATE() > sla_max_target_date THEN 1 ELSE 0 END) as overdue /* DIPERBAIKI */
                 FROM t_recruitment_sla
             `);
             slaStats = sla[0];
@@ -390,9 +390,9 @@ router.get('/sla-performance', authenticate, isHRD, async (req, res) => {
                 AVG(DATEDIFF(sla_calculated_at, sla_request_created_at)) as avg_days_to_approval,
                 AVG(DATEDIFF(sla_completed_at, sla_calculated_at)) as avg_days_to_hire,
                 AVG(DATEDIFF(sla_completed_at, sla_request_created_at)) as avg_total_days,
-                AVG(DATEDIFF(sla_final_target_date, sla_completed_at)) as avg_vs_target,
-                SUM(CASE WHEN sla_completed_at <= sla_final_target_date THEN 1 ELSE 0 END) as ontime_count,
-                SUM(CASE WHEN sla_completed_at > sla_final_target_date THEN 1 ELSE 0 END) as late_count
+                AVG(DATEDIFF(sla_max_target_date, sla_completed_at)) as avg_vs_target,
+                SUM(CASE WHEN sla_completed_at <= sla_max_target_date THEN 1 ELSE 0 END) as ontime_count,
+                SUM(CASE WHEN sla_completed_at > sla_max_target_date THEN 1 ELSE 0 END) as late_count
             FROM t_recruitment_sla
             ${whereClause}
         `, params);
@@ -440,11 +440,18 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
                 sla.sla_tpk_nomor,
                 j.jab_nama,
                 sla.sla_min_days,
+                sla.sla_max_days,
                 DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) as duration_calendar,
                 sla.sla_no_show_buffer_days as buffer_noshow,
                 (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) as net_hrd_duration,
                 p.tpk_jumlah as target_count,
-                sla.sla_hired_count as hired_count
+                sla.sla_hired_count as hired_count,
+                CASE 
+                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_min_days THEN 'EXCELLENT'
+                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_max_days THEN 'GOOD'
+                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= (sla.sla_max_days + (sla.sla_max_days - sla.sla_min_days)) THEN 'ACCEPTABLE'
+                    ELSE 'DELAY'
+                END as kpi_status
             FROM t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
@@ -453,10 +460,9 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
 
         const processedData = rows.map(row => ({
             ...row,
-            kpi_status: row.net_hrd_duration <= row.sla_min_days ? 'EXCELLENT' : 'DELAY',
-            score: row.net_hrd_duration <= row.sla_min_days
-                ? 100
-                : Math.max(0, 100 - (row.net_hrd_duration - row.sla_min_days) * 5)
+            score: row.net_hrd_duration <= row.sla_min_days 
+                ? 100 
+                : Math.max(0, 100 - (row.net_hrd_duration - row.sla_min_days) * 5) // Catatan: Rumus pengurangan skor 5 poin ini bisa Anda sesuaikan nanti jika perlu
         }));
 
         res.json({
@@ -465,7 +471,7 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
             summary: {
                 total_cases: processedData.length,
                 on_time_rate: processedData.length > 0
-                    ? (processedData.filter(d => d.kpi_status === 'EXCELLENT').length / processedData.length * 100).toFixed(2) + '%'
+                    ? ((processedData.filter(d => d.kpi_status === 'EXCELLENT' || d.kpi_status === 'GOOD').length / processedData.length) * 100).toFixed(2) + '%'
                     : '0%'
             }
         });
@@ -494,7 +500,7 @@ router.get('/sla-summary', authenticate, async (req, res) => {
                 SUM(CASE WHEN sla.sla_source = 'SYSTEM' THEN 1 ELSE 0 END) as system_adjusted,
                 SUM(CASE WHEN sla.sla_source = 'USER' THEN 1 ELSE 0 END) as user_met,
                 SUM(CASE WHEN sla.sla_is_editable = 1 THEN 1 ELSE 0 END) as pending_user_edit,
-                AVG(DATEDIFF(sla.sla_final_target_date, CURDATE())) as avg_days_remaining
+                AVG(DATEDIFF(sla.sla_max_target_date, CURDATE())) as avg_days_remaining
             FROM tpermintaankaryawan p
             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             ${whereClause}

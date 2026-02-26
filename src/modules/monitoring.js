@@ -346,9 +346,9 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
                 CASE 
                     WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_min_days 
                         THEN 'EXCELLENT'
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= (sla.sla_min_days * 1.2)
+                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_max_days
                         THEN 'GOOD'
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= (sla.sla_min_days * 1.5)
+                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= (sla.sla_max_days + (sla.sla_max_days - sla.sla_min_days))
                         THEN 'ACCEPTABLE'
                     ELSE 'DELAY'
                 END as performance_label,
@@ -540,7 +540,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
              JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause} ${andOrWhere} sla.sla_status = 'CALCULATED'
-             AND CURDATE() > sla.sla_final_target_date`,
+             AND CURDATE() > sla.sla_max_target_date`, 
             params
         );
 

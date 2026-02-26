@@ -24,10 +24,10 @@ const runSlaSync = async () => {
             // 2. Tarik jumlah hired HANYA untuk tiket yang aktif
             //    Ringan untuk Federated Engine karena difilter dengan IN (...)
             const [hiredData] = await connection.query(`
-                SELECT tlp_tpk_nomor, COUNT(*) as total_hired 
-                FROM tlistpelamar 
-                WHERE statusterakhir = 1 AND tlp_tpk_nomor IN (${placeholders})
-                GROUP BY tlp_tpk_nomor
+                SELECT rpk_tpk_nomor AS tlp_tpk_nomor, SUM(rpk_jumlah) as total_hired 
+                FROM triilpermintaankaryawan 
+                WHERE rpk_tpk_nomor IN (${placeholders})
+                GROUP BY rpk_tpk_nomor
             `, tpkNomors);
 
             // Mapping hasil query ke object/dictionary untuk akses cepat di Node.js

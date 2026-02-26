@@ -1166,12 +1166,11 @@ router.get('/:tpkNomor/hired-candidates', async (req, res) => {
         const { tpkNomor } = req.params;
         const [rows] = await db.query(`
             SELECT 
-                lp.tlp_rkt_nomor AS rkt_nomor, 
-                r.rkt_nama AS nama, 
-                lp.tgl_diterima 
-            FROM tlistpelamar lp
-            JOIN trekruitmen r ON lp.tlp_rkt_nomor = r.rkt_nomor
-            WHERE lp.tlp_tpk_nomor = ? AND lp.statusterakhir = 1
+                rpk_nomor AS rkt_nomor, 
+                rpk_keterangannama AS nama, 
+                rpk_tanggal AS tgl_diterima 
+            FROM triilpermintaankaryawan
+            WHERE rpk_tpk_nomor = ?
         `, [tpkNomor]);
 
         res.json({ success: true, data: rows });
@@ -1192,16 +1191,36 @@ router.post('/:tpkNomor/cancel-candidate', async (req, res) => {
         const { rktNomor, bufferDays, keterangan } = req.body;
         const userKode = req.user ? req.user.userKode : 'SYSTEM';
 
-        // 1. UPDATE Legacy Database: Ubah status pelamar jadi 2 (Batal/Tidak Diterima)
-        // (Trigger tlistpelamar_after_update akan otomatis mengisi tgl_tidakditerima dan mengupdate trekruitmen)
-        await connection.query(`
-            UPDATE tlistpelamar 
-            SET statusterakhir = 2 
-            WHERE tlp_tpk_nomor = ? AND tlp_rkt_nomor = ?
-        `, [tpkNomor, rktNomor]);
+        // 1. Ambil Nama Kandidat dari tabel realisasi (karena rktNomor disini adalah rpk_nomor)
+        const [realisasi] = await connection.query(
+            'SELECT rpk_keterangannama FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
+            [tpkNomor, rktNomor]
+        );
 
-        // 2. UPDATE SLA: Kurangi hired count, tambah buffer, kembalikan ke CALCULATED
-        const [updateSlaResult] = await connection.query(`
+        let namaKandidat = null;
+        if (realisasi.length > 0) {
+            namaKandidat = realisasi[0].rpk_keterangannama;
+            
+            // 2. Hapus data dari Muara (Tabel Realisasi)
+            await connection.query(
+                'DELETE FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
+                [tpkNomor, rktNomor]
+            );
+        }
+
+        // 3. SAPU BERSIH: Update histori tlistpelamar jika HRD ternyata memakai fitur lama
+        // (Sistem mencari berdasarkan kecocokan nama pelamar)
+        if (namaKandidat) {
+            await connection.query(`
+                UPDATE tlistpelamar lp
+                JOIN trekruitmen r ON r.rkt_nomor = lp.tlp_rkt_nomor
+                SET lp.statusterakhir = 2
+                WHERE lp.tlp_tpk_nomor = ? AND r.rkt_nama = ?
+            `, [tpkNomor, namaKandidat]);
+        }
+
+        // 4. UPDATE SLA: Kurangi hired count, tambah buffer, turunkan status ke CALCULATED
+        await connection.query(`
             UPDATE t_recruitment_sla 
             SET 
                 sla_hired_count = GREATEST(0, sla_hired_count - 1),
@@ -1211,8 +1230,8 @@ router.post('/:tpkNomor/cancel-candidate', async (req, res) => {
             WHERE sla_tpk_nomor = ?
         `, [bufferDays, tpkNomor]);
 
-        // 3. Catat Log
-        const logNotes = `Kandidat ${rktNomor} dibatalkan (No-Show). Buffer +${bufferDays} hari ditambahkan. Alasan: ${keterangan}`;
+        // 5. Catat Log
+        const logNotes = `Kandidat dibatalkan (No-Show). Buffer +${bufferDays} hari ditambahkan. Alasan: ${keterangan}`;
         await connection.query(`
             INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
             VALUES (?, ?, 'cancel_candidate', 'Hired', ?)
