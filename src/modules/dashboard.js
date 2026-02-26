@@ -462,7 +462,7 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
             ...row,
             score: row.net_hrd_duration <= row.sla_min_days 
                 ? 100 
-                : Math.max(0, 100 - (row.net_hrd_duration - row.sla_min_days) * 5) // Catatan: Rumus pengurangan skor 5 poin ini bisa Anda sesuaikan nanti jika perlu
+                : Math.max(0, 100 - (row.net_hrd_duration - row.sla_min_days) * 5)
         }));
 
         res.json({
@@ -485,14 +485,30 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
 /**
  * GET /api/dashboard/sla-summary
  * SLA summary untuk semua role
+ *
+ * ✅ FIX #6: Refactor whereClause agar tidak rapuh.
+ * Sebelumnya: whereClause = '' (string kosong) saat is_hrd = true.
+ * String kosong adalah falsy di JS, sehingga kondisi ternary
+ * `${whereClause ? 'AND' : 'WHERE'}` kebetulan benar, tapi membingungkan dan rawan salah.
+ * Sekarang menggunakan array conditions yang di-join secara eksplisit,
+ * konsisten dengan pola di monitoring.js.
  */
 router.get('/sla-summary', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd = req.user.user_hrd;
 
     try {
-        const whereClause = is_hrd ? '' : 'WHERE p.tpk_peminta = ?';
-        const params = is_hrd ? [] : [user_kode];
+        // ✅ FIX #6: Bangun conditions sebagai array, lalu join dengan AND.
+        // Hasilnya selalu valid SQL tanpa bergantung pada kebetulan falsy/truthy string kosong.
+        const conditions = [`sla.sla_status = 'CALCULATED'`];
+        const params = [];
+
+        if (!is_hrd) {
+            conditions.push(`p.tpk_peminta = ?`);
+            params.push(user_kode);
+        }
+
+        const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
         const [rows] = await db.execute(`
             SELECT 
@@ -504,7 +520,6 @@ router.get('/sla-summary', authenticate, async (req, res) => {
             FROM tpermintaankaryawan p
             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             ${whereClause}
-            ${whereClause ? 'AND' : 'WHERE'} sla.sla_status = 'CALCULATED'
         `, params);
 
         res.json({ success: true, data: rows[0] });

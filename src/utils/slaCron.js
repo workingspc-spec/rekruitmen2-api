@@ -21,10 +21,16 @@ const runSlaSync = async () => {
             const tpkNomors     = activeSlas.map(s => s.sla_tpk_nomor);
             const placeholders  = tpkNomors.map(() => '?').join(',');
 
-            // 2. Tarik jumlah hired HANYA untuk tiket yang aktif
-            //    Ringan untuk Federated Engine karena difilter dengan IN (...)
+            // 2. Tarik jumlah hired HANYA untuk tiket yang aktif.
+            //
+            // ✅ FIX #4: Ganti SUM(rpk_jumlah) → COUNT(*) agar konsisten dengan logika
+            // cancel-candidate yang menghapus 1 baris dan mengurangi sla_hired_count sebesar 1.
+            //
+            // Sebelumnya SUM(rpk_jumlah) bisa menghasilkan angka berbeda jika satu baris
+            // memiliki rpk_jumlah > 1, menyebabkan drift antara data cron dan data real-time.
+            // COUNT(*) = "1 baris = 1 orang hired" → sinkron dengan logika -1 di cancel-candidate.
             const [hiredData] = await connection.query(`
-                SELECT rpk_tpk_nomor AS tlp_tpk_nomor, SUM(rpk_jumlah) as total_hired 
+                SELECT rpk_tpk_nomor AS tlp_tpk_nomor, COUNT(*) as total_hired 
                 FROM triilpermintaankaryawan 
                 WHERE rpk_tpk_nomor IN (${placeholders})
                 GROUP BY rpk_tpk_nomor

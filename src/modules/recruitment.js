@@ -314,19 +314,23 @@ router.post('/save', authenticate, async (req, res) => {
 
             // Re-schedule: update SLA dan buka kunci
             if (isEditable) {
+                // ✅ FIX #3: Sertakan sla_max_target_date agar logika monitoring tetap akurat
+                // setelah re-schedule. GREATEST memastikan max_target_date tidak mundur ke
+                // nilai lama yang lebih kecil dari tgl_butuh baru.
                 await connection.execute(
                     `UPDATE t_recruitment_sla SET
                         sla_job_code = ?,
                         sla_original_requested_date = ?,
                         sla_system_ceiling_date = ?,
                         sla_final_target_date = GREATEST(COALESCE(sla_system_floor_date, CURDATE()), ?),
+                        sla_max_target_date   = GREATEST(sla_max_target_date, ?),
                         sla_is_editable = 0,
                         sla_notes = CONCAT(
                             COALESCE(sla_notes,''),
                             '\n[', NOW(), '] Re-schedule oleh User (New Date: ', ?, ')'
                         )
                     WHERE sla_tpk_nomor = ?`,
-                    [jab_kode, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tpk_nomor]
+                    [jab_kode, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tpk_nomor]
                 );
             }
 
@@ -372,15 +376,19 @@ router.post('/save', authenticate, async (req, res) => {
                 }
             }
 
-            // Update SLA jika masih PENDING (draft yang belum diapprove atasan)
-            await connection.execute(
-                `UPDATE t_recruitment_sla
-                 SET sla_job_code = ?,
-                     sla_original_requested_date = ?,
-                     sla_system_ceiling_date = ?
-                 WHERE sla_tpk_nomor = ? AND sla_status = 'PENDING'`,
-                [jab_kode, tgl_butuh, tgl_butuh, tpk_nomor]
-            );
+            // ✅ FIX #5: Hanya jalankan update PENDING saat isDraft.
+            // Saat isEditable (re-schedule), status SLA sudah CALCULATED — query ini
+            // tidak akan match (dead code). Dibungkus isDraft agar eksplisit & tidak membingungkan.
+            if (isDraft) {
+                await connection.execute(
+                    `UPDATE t_recruitment_sla
+                     SET sla_job_code = ?,
+                         sla_original_requested_date = ?,
+                         sla_system_ceiling_date = ?
+                     WHERE sla_tpk_nomor = ? AND sla_status = 'PENDING'`,
+                    [jab_kode, tgl_butuh, tgl_butuh, tpk_nomor]
+                );
+            }
 
             await connection.commit();
             connection.release();
@@ -644,11 +652,11 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
             if (master.jlt_is_flexible === 1) {
                 finalTargetDate = requestedDate;
-                maxTargetDate   = requestedDate; // <-- [TAMBAHAN 2]
+                maxTargetDate   = requestedDate;
                 slaSource = 'FLEXIBLE';
             } else {
                 systemFloorDate = addWorkdays(approvedAt, master.jlt_min_days);
-                maxTargetDate   = addWorkdays(approvedAt, master.jlt_max_days); // <-- [TAMBAHAN 3] Hitung batas max
+                maxTargetDate   = addWorkdays(approvedAt, master.jlt_max_days);
 
                 if (systemFloorDate.getTime() > requestedDate.getTime()) {
                     finalTargetDate = systemFloorDate;
@@ -871,7 +879,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
  */
 router.post('/complete', authenticate, isHRD, async (req, res) => {
     const { tpk_nomor, hired_count } = req.body;
-    const userKode = req.user.user_kode; // Ambil kode HRD yang menekan tombol
+    const userKode = req.user.user_kode;
 
     if (!tpk_nomor) {
         return res.status(400).json({ success: false, message: 'tpk_nomor diperlukan' });
@@ -1161,7 +1169,8 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
 // =========================================================================
 // GET HIRED CANDIDATES (Daftar Kandidat Diterima)
 // =========================================================================
-router.get('/:tpkNomor/hired-candidates', async (req, res) => {
+// ✅ FIX #1: Tambah middleware authenticate — sebelumnya route ini terbuka tanpa auth
+router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
     try {
         const { tpkNomor } = req.params;
         const [rows] = await db.query(`
@@ -1183,13 +1192,18 @@ router.get('/:tpkNomor/hired-candidates', async (req, res) => {
 // =========================================================================
 // CANCEL CANDIDATE (Batalkan / No-Show langsung ke database legacy)
 // =========================================================================
-router.post('/:tpkNomor/cancel-candidate', async (req, res) => {
+// ✅ FIX #2a: Tambah middleware authenticate — sebelumnya route ini terbuka tanpa auth
+// ✅ FIX #2b: req.user.user_kode (bukan req.user.userKode yang selalu undefined)
+router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();
         const { tpkNomor } = req.params;
         const { rktNomor, bufferDays, keterangan } = req.body;
-        const userKode = req.user ? req.user.userKode : 'SYSTEM';
+
+        // ✅ FIX #2b: Gunakan user_kode (snake_case) sesuai authMiddleware.js
+        // req.user di-set oleh middleware authenticate dengan field: user_kode, user_nama, user_hrd
+        const userKode = req.user.user_kode;
 
         // 1. Ambil Nama Kandidat dari tabel realisasi (karena rktNomor disini adalah rpk_nomor)
         const [realisasi] = await connection.query(
