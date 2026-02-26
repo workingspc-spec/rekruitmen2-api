@@ -11,12 +11,10 @@ const router = express.Router();
  * =====================================================================
  */
 
-/**
- * GET /api/monitoring/sla-status
- * - HRD: Melihat SEMUA permintaan yang sedang berjalan
- * - Peminta: Melihat permintaan yang dia ajukan
- * - Atasan: Melihat permintaan miliknya + bawahan
- */
+// =====================================================================
+// ROUTER 1: GET /api/monitoring/sla-status
+// PERUBAHAN: days_remaining & CASE WHEN ui_status_tag → pakai sla_max_target_date
+// =====================================================================
 router.get('/sla-status', authenticate, async (req, res) => {
     const { user_kode, user_hrd } = req.user;
 
@@ -44,6 +42,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 
                 sla.sla_calculated_at,
                 sla.sla_final_target_date,
+                sla.sla_max_target_date,
                 sla.sla_min_days as standard_lead_time,
                 sla.sla_no_show_buffer_days,
                 sla.sla_is_editable,
@@ -55,7 +54,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 
                 approver.kar_nama AS approver_name,
                 
-                DATEDIFF(sla.sla_final_target_date, CURDATE()) as days_remaining,
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) as days_remaining, /* [UBAH] Gunakan max_target_date */
                 p.tpk_jumlah as target_count,
                 
                 ROUND((COALESCE(sla.sla_hired_count, 0) / NULLIF(p.tpk_jumlah, 0)) * 100) AS progress_percentage,
@@ -63,9 +62,9 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 CASE 
                     WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
-                    WHEN CURDATE() > sla.sla_final_target_date THEN 'OVERDUE'
-                    WHEN DATEDIFF(sla.sla_final_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
-                    WHEN DATEDIFF(sla.sla_final_target_date, CURDATE()) <= 7 THEN 'WARNING'
+                    WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'          /* [UBAH] Patokan Overdue */
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL' /* [UBAH] */
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'  /* [UBAH] */
                     ELSE 'ON_PROGRESS'
                 END as ui_status_tag,
                 
@@ -85,7 +84,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
             ORDER BY 
                 CASE 
                     WHEN sla.sla_is_editable = 1 THEN 0
-                    WHEN CURDATE() > sla.sla_final_target_date THEN 1
+                    WHEN CURDATE() > sla.sla_max_target_date THEN 1
                     ELSE 2
                 END ASC,
                 days_remaining ASC
@@ -101,8 +100,6 @@ router.get('/sla-status', authenticate, async (req, res) => {
             critical: rows.filter(r => r.ui_status_tag === 'CRITICAL').length,
             warning: rows.filter(r => r.ui_status_tag === 'WARNING').length,
             on_progress: rows.filter(r => r.ui_status_tag === 'ON_PROGRESS').length,
-            
-            // ✅ TAMBAHKAN 2 BARIS INI AGAR ANGKA DI RINGKASAN FRONTEND MUNCUL:
             total_hired: rows.reduce((sum, r) => sum + (Number(r.sla_hired_count) || 0), 0),
             total_target: rows.reduce((sum, r) => sum + (Number(r.target_count) || 0), 0)
         };
@@ -136,10 +133,10 @@ router.get('/sla-status', authenticate, async (req, res) => {
     }
 });
 
-/**
- * GET /api/monitoring/sla-detail/:tpk_nomor
- * Detail SLA untuk satu permintaan
- */
+// =====================================================================
+// ROUTER 2: GET /api/monitoring/sla-detail/:tpk_nomor
+// PERUBAHAN: days_remaining → max_target_date, tambah max_target_date di timeline response
+// =====================================================================
 router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
     const { tpk_nomor } = req.params;
     const { user_kode, user_hrd } = req.user;
@@ -174,7 +171,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                 p.tpk_bagian,
                 p.tpk_peminta,
                 k.kar_nama AS nama_peminta,
-                DATEDIFF(sla.sla_final_target_date, CURDATE()) AS days_remaining,
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining, /* [UBAH] Gunakan max_target_date */
                 approver.kar_nama AS approver_name,
                 CASE
                     WHEN sla.sla_approval_delay_days > 5 THEN 'APPROVAL_DELAYED'
@@ -193,7 +190,6 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Data SLA tidak ditemukan' });
         }
 
-        // Edit history dari audit log
         const [editHistory] = await db.execute(
             `SELECT 
                 l.log_id,
@@ -222,6 +218,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                     original_target_date: sla.sla_original_requested_date,
                     system_floor_date: sla.sla_system_floor_date,
                     final_target_date: sla.sla_final_target_date,
+                    max_target_date: sla.sla_max_target_date, /* [TAMBAHAN] Kirim ke Frontend */
                     buffer_days_added: sla.sla_no_show_buffer_days,
                     days_remaining: sla.days_remaining
                 },
@@ -240,10 +237,10 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
     }
 });
 
-/**
- * GET /api/monitoring/sla-dashboard/:tpk_nomor
- * Summary cepat SLA untuk satu permintaan
- */
+// =====================================================================
+// ROUTER 3: GET /api/monitoring/sla-dashboard/:tpk_nomor
+// PERUBAHAN: days_remaining & CASE WHEN ui_status → pakai sla_max_target_date
+// =====================================================================
 router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
     const { tpk_nomor } = req.params;
     const { user_kode, user_hrd } = req.user;
@@ -274,19 +271,20 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
             `SELECT 
                 sla.sla_tpk_nomor,
                 sla.sla_final_target_date,
+                sla.sla_max_target_date,
                 sla.sla_is_editable,
                 sla.sla_no_show_buffer_days,
                 sla.sla_status,
                 sla.sla_hired_count,
                 j.jab_nama,
                 p.tpk_jumlah,
-                DATEDIFF(sla.sla_final_target_date, CURDATE()) AS days_remaining,
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining, /* [UBAH] Gunakan max_target_date */
                 CASE
                     WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
-                    WHEN CURDATE() > sla.sla_final_target_date THEN 'OVERDUE'
-                    WHEN DATEDIFF(sla.sla_final_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
-                    WHEN DATEDIFF(sla.sla_final_target_date, CURDATE()) <= 7 THEN 'WARNING'
+                    WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'          /* [UBAH] Patokan Overdue */
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL' /* [UBAH] */
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'  /* [UBAH] */
                     ELSE 'ON_PROGRESS'
                 END AS ui_status
              FROM t_recruitment_sla sla
@@ -588,10 +586,10 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
     }
 });
 
-/**
- * GET /api/monitoring/check-deadline
- * SLA Critical Alert (≤ 3 hari)
- */
+// =====================================================================
+// ROUTER 4: GET /api/monitoring/check-deadline
+// PERUBAHAN: days_remaining & filter BETWEEN → pakai sla_max_target_date
+// =====================================================================
 router.get('/check-deadline', authenticate, isHRD, async (req, res) => {
     try {
         const [rows] = await db.execute(`
@@ -602,14 +600,15 @@ router.get('/check-deadline', authenticate, isHRD, async (req, res) => {
                 p.tpk_peminta,
                 k.kar_nama AS nama_peminta,
                 sla.sla_final_target_date,
-                DATEDIFF(sla.sla_final_target_date, CURDATE()) AS days_remaining
+                sla.sla_max_target_date,
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining /* [UBAH] Gunakan max_target_date */
             FROM t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
             WHERE sla.sla_status = 'CALCULATED'
               AND sla.sla_is_editable = 0
-              AND DATEDIFF(sla.sla_final_target_date, CURDATE()) BETWEEN 0 AND 3
+              AND DATEDIFF(sla.sla_max_target_date, CURDATE()) BETWEEN 0 AND 3 /* [UBAH] Gunakan max_target_date */
             ORDER BY days_remaining ASC
         `);
 

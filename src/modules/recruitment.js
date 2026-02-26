@@ -637,23 +637,23 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
             let systemFloorDate = null;
             let finalTargetDate = null;
+            let maxTargetDate   = null;
             let slaSource       = null;
 
             const approvalDelayDays = countWorkdays(createdAt, approvedAt);
 
             if (master.jlt_is_flexible === 1) {
                 finalTargetDate = requestedDate;
+                maxTargetDate   = requestedDate; // <-- [TAMBAHAN 2]
                 slaSource = 'FLEXIBLE';
             } else {
                 systemFloorDate = addWorkdays(approvedAt, master.jlt_min_days);
+                maxTargetDate   = addWorkdays(approvedAt, master.jlt_max_days); // <-- [TAMBAHAN 3] Hitung batas max
 
                 if (systemFloorDate.getTime() > requestedDate.getTime()) {
-                    // User minta terlalu cepat (misal: minta tgl 24 padahal sistem butuh min sampai tgl 26)
                     finalTargetDate = systemFloorDate;
                     slaSource = 'SYSTEM';
                 } else {
-                    // User minta tgl 27, sistem sanggup tgl 26.
-                    // Kita samakan floor_date ke 27 agar timeline di UI sinkron (sejajar).
                     systemFloorDate = requestedDate; 
                     finalTargetDate = requestedDate;
                     slaSource = 'USER';
@@ -674,6 +674,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                     sla_is_flexible               = ?,
                     sla_system_floor_date         = ?,
                     sla_final_target_date         = ?,
+                    sla_max_target_date           = ?,
                     sla_original_requested_date   = ?,
                     sla_source                    = ?,
                     sla_approval_delay_days       = ?,
@@ -687,6 +688,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                     master.jlt_is_flexible,
                     formatDateSafe(systemFloorDate),
                     formatDateSafe(finalTargetDate),
+                    formatDateSafe(maxTargetDate),
                     formatDateSafe(requestedDate),
                     slaSource,
                     approvalDelayDays,
