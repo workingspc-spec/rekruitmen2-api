@@ -118,6 +118,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
         const [rows] = await db.execute(`
             SELECT 
                 p.tpk_nomor,
+                p.tpk_peminta,
                 j.jab_nama,
                 p.tpk_bagian,
                 p.tpk_jumlah,
