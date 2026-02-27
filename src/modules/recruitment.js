@@ -1289,4 +1289,72 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
     }
 });
 
+// DELETE /api/recruitment/batch-delete
+// Body: { tpkNomors: ["001/HRD/PKAR/02/2026", "002/HRD/PKAR/02/2026"] }
+router.delete('/batch-delete', authenticate, async (req, res) => {
+  const { tpkNomors } = req.body;
+  const userKode = req.user.user_kode;  // NIK dari JWT
+
+  if (!Array.isArray(tpkNomors) || tpkNomors.length === 0) {
+    return res.status(400).json({ success: false, message: 'Tidak ada data yang dipilih' });
+  }
+  if (tpkNomors.length > 20) {
+    return res.status(400).json({ success: false, message: 'Maksimal 20 item per batch' });
+  }
+
+  const placeholders = tpkNomors.map(() => '?').join(',');
+  const conn = await db.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // Guard: pastikan semua PKAR milik user ini dan belum diapprove atasan
+    const [rows] = await conn.execute(
+      `SELECT tpk_nomor FROM tpermintaankaryawan 
+       WHERE tpk_nomor IN (${placeholders}) 
+         AND tpk_peminta = ? 
+         AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
+      [...tpkNomors, userKode]
+    );
+
+    if (rows.length !== tpkNomors.length) {
+      await conn.rollback();
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Beberapa permintaan tidak valid atau sudah diproses atasan' 
+      });
+    }
+
+    // 1. Tulis log audit SEBELUM delete
+    const logValues = tpkNomors.map(nomor => [nomor, 'batch_deleted', 'PENDING', 'DELETED_BY_USER', userKode]);
+    await conn.query(
+      `INSERT INTO t_pkar_log (tpk_nomor, field_name, old_value, new_value, user_kode, created_at) VALUES ?`,
+      [logValues.map(v => [...v, new Date()])]
+    );
+
+    // 2. Delete dari t_recruitment_sla (lokal — bisa pakai transaction)
+    await conn.execute(
+      `DELETE FROM t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders}) AND sla_status = 'PENDING'`,
+      tpkNomors
+    );
+
+    // 3. Delete dari tpermintaankaryawan (FEDERATED — di luar transaction lokal)
+    await conn.execute(
+      `DELETE FROM tpermintaankaryawan 
+       WHERE tpk_nomor IN (${placeholders}) 
+         AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
+      tpkNomors
+    );
+
+    await conn.commit();
+    res.json({ success: true, deleted: tpkNomors.length });
+
+  } catch (err) {
+    await conn.rollback();
+    res.status(500).json({ success: false, message: err.message });
+  } finally {
+    conn.release();
+  }
+});
+
 module.exports = router;
