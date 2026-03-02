@@ -437,10 +437,9 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
                 j.jab_nama,
                 DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) AS sla_approval_delay_days,
                 CASE
-                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 1 THEN 'EXCELLENT'
-                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 3 THEN 'GOOD'
-                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 5 THEN 'SLOW'
-                    ELSE 'VERY_SLOW'
+                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 2 THEN 'FAST_TRACK'
+                    WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 5 THEN 'STANDARD_REVIEW'
+                    ELSE 'EXTENDED_REVIEW'
                 END AS approval_performance
             FROM t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
@@ -460,10 +459,9 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
                 COALESCE(approver.kar_nama, 'TANPA ATASAN') AS approver_name,
                 COUNT(*) AS total_approvals,
                 ROUND(AVG(DATEDIFF(sla.sla_approved_at, p.tpk_tanggal)), 1) AS avg_delay_days,
-                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 1 THEN 1 ELSE 0 END) AS excellent_count,
-                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) BETWEEN 2 AND 3 THEN 1 ELSE 0 END) AS good_count,
-                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) BETWEEN 4 AND 5 THEN 1 ELSE 0 END) AS slow_count,
-                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) > 5 THEN 1 ELSE 0 END) AS very_slow_count
+                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 2 THEN 1 ELSE 0 END) AS fast_track_count,
+                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) BETWEEN 3 AND 5 THEN 1 ELSE 0 END) AS standard_review_count,
+                SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) > 5 THEN 1 ELSE 0 END) AS extended_review_count
             FROM t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             LEFT JOIN tkaryawan peminta ON peminta.kar_nik = p.tpk_peminta
@@ -478,10 +476,9 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
         `);
 
         const totalRecords = rows.length;
-        const excellentCount = rows.filter(r => r.approval_performance === 'EXCELLENT').length;
-        const goodCount      = rows.filter(r => r.approval_performance === 'GOOD').length;
-        const slowCount      = rows.filter(r => r.approval_performance === 'SLOW').length;
-        const verySlowCount  = rows.filter(r => r.approval_performance === 'VERY_SLOW').length;
+        const fastTrackCount      = rows.filter(r => r.approval_performance === 'FAST_TRACK').length;
+        const standardReviewCount = rows.filter(r => r.approval_performance === 'STANDARD_REVIEW').length;
+        const extendedReviewCount = rows.filter(r => r.approval_performance === 'EXTENDED_REVIEW').length;
         const avgDelay = totalRecords > 0
             ? rows.reduce((s, r) => s + r.sla_approval_delay_days, 0) / totalRecords
             : 0;
@@ -494,9 +491,17 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
                 period: period || 'all_time',
                 total_approvals: totalRecords,
                 avg_approval_delay_days: Math.round(avgDelay * 10) / 10,
-                performance_distribution: { excellent: excellentCount, good: goodCount, slow: slowCount, very_slow: verySlowCount },
+                
+                // ✅ UBAH BAGIAN INI SESUAI DENGAN FIELD BARU
+                performance_distribution: { 
+                    fast_track_count: fastTrackCount, 
+                    standard_review_count: standardReviewCount, 
+                    extended_review_count: extendedReviewCount 
+                },
+                
+                // ✅ UBAH JUGA RUMUS RATE-NYA (Gabungan Fast Track + Standard)
                 fast_approval_rate: totalRecords > 0
-                    ? Math.round(((excellentCount + goodCount) / totalRecords) * 100)
+                    ? Math.round(((fastTrackCount + standardReviewCount) / totalRecords) * 100)
                     : 0
             },
             insights: {

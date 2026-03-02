@@ -692,9 +692,8 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             }
 
             const diffDays      = countWorkdays(requestedDate, finalTargetDate);
-            const approvalNote = approvalDelayDays > 0
-                ? `Approval atasan terlambat ${approvalDelayDays} hari kerja.`
-                : `Approval atasan tepat waktu.`;
+            // Cukup catat kejadiannya secara obyektif
+            const approvalNote = `Telah dievaluasi dan disetujui oleh atasan.`;
 
             // ✅ Catatan transparansi untuk bulk request
             const bulkNote = extraDays > 0
