@@ -1,12 +1,11 @@
+// ✅ Set timezone SEBELUM apa pun
+process.env.TZ = 'Asia/Jakarta';
 // app.js
 const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const helmet = require('helmet');
 const slaCron = require('./src/utils/slaCron');
-
-// ✅ Set timezone SEBELUM apa pun
-process.env.TZ = 'Asia/Jakarta';
 
 // ✅ Default NODE_ENV
 process.env.NODE_ENV = process.env.NODE_ENV || 'local';
