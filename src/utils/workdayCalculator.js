@@ -29,28 +29,6 @@ const INDONESIAN_HOLIDAYS_2026 = [
 ];
 
 /**
- * ✅ TIMEZONE-SAFE: Selalu kembalikan "hari ini" dalam WIB (Asia/Jakarta)
- * tanpa peduli timezone server PM2/Linux.
- *
- * Cara kerja:
- *  - toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' }) → "2026-03-03"
- *  - Parse string itu ke Date lokal midnight → tidak ada UTC shift
- *
- * ❌ JANGAN gunakan: const today = new Date(); today.setHours(0,0,0,0);
- *    → Bergantung pada timezone sistem server, tidak reliable di PM2/Linux UTC
- *
- * ✅ GUNAKAN ini di mana pun butuh "tanggal hari ini":
- *    const today = getTodayWIB();
- */
-function getTodayWIB() {
-    const now = new Date();
-    // en-CA menghasilkan format YYYY-MM-DD — mudah di-parse, tidak perlu regex
-    const wibDateStr = now.toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
-    const [y, m, d] = wibDateStr.split('-').map(Number);
-    return new Date(y, m - 1, d, 0, 0, 0, 0);
-}
-
-/**
  * ✅ TIMEZONE-SAFE: Format tanggal tanpa bias UTC
  */
 function formatDateSafe(date) {
@@ -66,10 +44,12 @@ function formatDateSafe(date) {
  * ✅ FIXED: Check apakah tanggal adalah hari libur (TANPA UTC SHIFT)
  */
 function isHoliday(date) {
+    // Gunakan cara manual agar tidak terpengaruh UTC shift
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const day = String(date.getDate()).padStart(2, '0');
     const dateStr = `${year}-${month}-${day}`;
+    
     return INDONESIAN_HOLIDAYS_2026.includes(dateStr);
 }
 
@@ -79,7 +59,7 @@ function isHoliday(date) {
  */
 function isWeekend(date) {
     const day = date.getDay();
-    return day === 0; // 0 = Minggu
+    return day === 0; // 0 = Minggu (Sabtu tidak dianggap weekend)
 }
 
 /**
@@ -91,7 +71,7 @@ function addWorkdays(startDate, workdays) {
 
     while (daysAdded < workdays) {
         currentDate.setDate(currentDate.getDate() + 1);
-
+        
         if (!isWeekend(currentDate) && !isHoliday(currentDate)) {
             daysAdded++;
         }
@@ -103,19 +83,24 @@ function addWorkdays(startDate, workdays) {
 /**
  * Hitung selisih hari kerja antara dua tanggal
  * ✅ FIX: Eksklusif startDate (mulai hitung dari hari berikutnya)
+ * Contoh: Request 12 Feb, Approve 12 Feb → delay = 0 hari
+ *         Request 12 Feb, Approve 13 Feb → delay = 1 hari (jika 13 Feb hari kerja)
  */
 function countWorkdays(startDate, endDate) {
     let count = 0;
     let currentDate = new Date(startDate);
     const end = new Date(endDate);
-
+    
+    // ✅ Normalisasi tanggal (set ke pukul 00:00:00 untuk perbandingan yang akurat)
     currentDate.setHours(0, 0, 0, 0);
     end.setHours(0, 0, 0, 0);
 
+    // ✅ Jika tanggal sama, return 0
     if (currentDate.getTime() === end.getTime()) {
         return 0;
     }
 
+    // ✅ Mulai dari hari SETELAH startDate
     currentDate.setDate(currentDate.getDate() + 1);
 
     while (currentDate <= end) {
@@ -133,7 +118,6 @@ module.exports = {
     countWorkdays,
     isHoliday,
     isWeekend,
-    formatDateSafe,
-    getTodayWIB,            // ✅ EXPORT BARU — wajib digunakan pengganti new Date()
+    formatDateSafe,  // ✅ EXPORT HELPER BARU
     INDONESIAN_HOLIDAYS_2026
 };
