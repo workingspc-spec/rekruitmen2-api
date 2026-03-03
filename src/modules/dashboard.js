@@ -82,10 +82,13 @@ router.get('/stats', authenticate, async (req, res) => {
         // 3. PENDING APPROVAL
         let pendingApproval = 0;
         if (is_hrd) {
-            const [hrdApprovals] = await db.execute(`
+            const approvalFilter = getDateFilter(period, 'tpk_tanggal');
+            let hrdApprovalQuery = `
                 SELECT COUNT(*) as total FROM tpermintaankaryawan 
                 WHERE tpk_approveatasan = 1 AND tpk_approveHRD = 0
-            `);
+            `;
+            if (approvalFilter.sql) hrdApprovalQuery += ` AND ${approvalFilter.sql}`;
+            const [hrdApprovals] = await db.execute(hrdApprovalQuery, approvalFilter.params);
             pendingApproval = hrdApprovals[0].total;
         } else {
             const approvalFilter = getDateFilter(period, 'tpk_tanggal');
