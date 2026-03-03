@@ -19,11 +19,9 @@ const { addWorkdays, countWorkdays, formatDateSafe } = require('../utils/workday
  */
 async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLeadTime = false) {
     try {
-        // ✅ FIX: Ambil tanggal dari database (sudah pasti WIB), bukan dari server Node.js
-        const [[{ current_date }]] = await connection.execute('SELECT CURDATE() as current_date');
-        const today = new Date(current_date + 'T00:00:00+07:00'); // ← Tambah +07:00
-        
-        // Parse tgl_butuh juga dengan timezone eksplisit
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
         const [y, m, d] = tgl_butuh.split('-').map(Number);
         const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
 
@@ -661,9 +659,8 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                 console.log(`[BULK BUFFER] ${tpk_nomor} — ${jumlahDiminta} orang, extra +${extraDays} hari. Min: ${master.jlt_min_days}, Max: ${master.jlt_max_days}`);
             }
 
-            // ✅ FIX: Ambil tanggal dari database
-            const [[{ current_date }]] = await connection.execute('SELECT CURDATE() as current_date');
-            const approvedAt = new Date(current_date + 'T00:00:00+07:00'); // ← Tambah +07:00
+            const approvedAt = new Date();
+            approvedAt.setHours(0, 0, 0, 0);
 
             const [y, m, d] = data.sla_original_requested_date.toString().split('T')[0].split('-').map(Number);
             const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
