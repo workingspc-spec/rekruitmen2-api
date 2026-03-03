@@ -21,8 +21,9 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
     try {
         // ✅ FIX: Ambil tanggal dari database (sudah pasti WIB), bukan dari server Node.js
         const [[{ current_date }]] = await connection.execute('SELECT CURDATE() as current_date');
-        const today = new Date(current_date + 'T00:00:00'); // Format: 2026-03-03T00:00:00
+        const today = new Date(current_date + 'T00:00:00+07:00'); // ← Tambah +07:00
         
+        // Parse tgl_butuh juga dengan timezone eksplisit
         const [y, m, d] = tgl_butuh.split('-').map(Number);
         const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
 
@@ -662,7 +663,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
             // ✅ FIX: Ambil tanggal dari database
             const [[{ current_date }]] = await connection.execute('SELECT CURDATE() as current_date');
-            const approvedAt = new Date(current_date + 'T00:00:00');
+            const approvedAt = new Date(current_date + 'T00:00:00+07:00'); // ← Tambah +07:00
 
             const [y, m, d] = data.sla_original_requested_date.toString().split('T')[0].split('-').map(Number);
             const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
