@@ -144,8 +144,8 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 COALESCE(sla.sla_hired_count, 0) as hired_count,
                 sla.sla_final_target_date,
                 sla.sla_source,
-                sla.sla_status,
-                sla.sla_is_editable
+                COALESCE(sla.sla_status, CASE WHEN p.tpk_approveatasan = 0 THEN 'PENDING' ELSE 'COMPLETED' END) as sla_status,
+                COALESCE(sla.sla_is_editable, 0) as sla_is_editable
             FROM tpermintaankaryawan p
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
