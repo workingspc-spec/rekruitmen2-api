@@ -125,12 +125,12 @@ router.get('/my-requests', authenticate, async (req, res) => {
         const [rows] = await db.execute(`
             SELECT 
                 p.tpk_nomor,
-                p.tpk_peminta,
+                TRIM(p.tpk_peminta) as tpk_peminta,
                 j.jab_nama,
                 p.tpk_bagian,
                 p.tpk_jumlah,
-                p.tpk_approveatasan,
-                p.tpk_approveHRD,
+                COALESCE(p.tpk_approveatasan, 0) as tpk_approveatasan,
+                COALESCE(p.tpk_approveHRD, 0) as tpk_approveHRD,
                 CASE 
                     WHEN p.tpk_approveHRD = 1 THEN 'APPROVED HRD'
                     WHEN p.tpk_approveatasan = 1 THEN 'APPROVED ATASAN'
@@ -144,7 +144,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 COALESCE(sla.sla_hired_count, 0) as hired_count,
                 sla.sla_final_target_date,
                 sla.sla_source,
-                COALESCE(sla.sla_status, CASE WHEN p.tpk_approveatasan = 0 THEN 'PENDING' ELSE 'COMPLETED' END) as sla_status,
+                COALESCE(sla.sla_status, CASE WHEN COALESCE(p.tpk_approveatasan, 0) = 0 THEN 'PENDING' ELSE 'COMPLETED' END) as sla_status,
                 COALESCE(sla.sla_is_editable, 0) as sla_is_editable
             FROM tpermintaankaryawan p
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
