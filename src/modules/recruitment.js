@@ -50,7 +50,14 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
         const { min_days, is_flexible } = rows[0];
         if (is_flexible === 1) return { valid: true };
 
-        const minDateObj = addWorkdays(today, min_days);
+        // 🔥 Hitung dari BESOK (sesuai pesan bisnis)
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+
+        // Karena besok sudah dihitung sebagai hari pertama,
+        // maka tambahkan (min_days - 1)
+        const minDateObj = addWorkdays(tomorrow, min_days - 1);
+
         const minDateStr = formatDateSafe(minDateObj);
 
         if (requestedDate < minDateObj) {
