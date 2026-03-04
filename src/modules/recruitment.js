@@ -322,14 +322,16 @@ router.post('/save', authenticate, async (req, res) => {
 
             // Re-schedule: update SLA dan buka kunci
             if (isEditable) {
-                // ✅ FIX #3: Sertakan sla_max_target_date agar logika monitoring tetap akurat
-                // setelah re-schedule. GREATEST memastikan max_target_date tidak mundur ke
-                // nilai lama yang lebih kecil dari tgl_butuh baru.
                 await connection.execute(
                     `UPDATE t_recruitment_sla SET
                         sla_job_code = ?,
                         sla_original_requested_date = ?,
                         sla_system_ceiling_date = ?,
+                        /* ✅ TAMBAHAN: Update sla_source agar UI Timeline tidak bingung */
+                        sla_source = CASE 
+                            WHEN ? >= sla_system_floor_date THEN 'USER' 
+                            ELSE sla_source 
+                        END,
                         sla_final_target_date = GREATEST(COALESCE(sla_system_floor_date, CURDATE()), ?),
                         sla_max_target_date   = GREATEST(sla_max_target_date, ?),
                         sla_is_editable = 0,
@@ -338,7 +340,16 @@ router.post('/save', authenticate, async (req, res) => {
                             '\n[', NOW(), '] Re-schedule oleh User (New Date: ', ?, ')'
                         )
                     WHERE sla_tpk_nomor = ?`,
-                    [jab_kode, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tpk_nomor]
+                    [
+                        jab_kode, 
+                        tgl_butuh, 
+                        tgl_butuh, 
+                        tgl_butuh, // <-- Parameter untuk pengecekan sla_source
+                        tgl_butuh, 
+                        tgl_butuh, 
+                        tgl_butuh, 
+                        tpk_nomor
+                    ]
                 );
             }
 

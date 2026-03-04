@@ -2,6 +2,7 @@
 const express = require('express');
 const db = require('../config/db');
 const { authenticate, isHRD } = require('../middleware/authMiddleware');
+const { countWorkdays } = require('../utils/workdayCalculator');
 const router = express.Router();
 
 /**
@@ -326,6 +327,7 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
             dateFilter = 'AND YEAR(sla.sla_completed_at) = YEAR(CURDATE())';
         }
 
+        // ✅ SQL KITA SEDERHANAKAN, HAPUS DATEDIFF
         const [rows] = await db.execute(`
             SELECT 
                 sla.sla_tpk_nomor,
@@ -336,22 +338,10 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
                 k.kar_nama as requester_name,
                 
                 sla.sla_min_days as standard_lead_time,
+                sla.sla_max_days, /* Tambahan wajib untuk JS */
                 sla.sla_calculated_at as start_date,
                 sla.sla_completed_at as completion_date,
-                
-                DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) as gross_duration_days,
                 sla.sla_no_show_buffer_days as no_show_buffer_days,
-                (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) as net_duration_days,
-                
-                CASE 
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_min_days 
-                        THEN 'EXCELLENT'
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_max_days
-                        THEN 'GOOD'
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= (sla.sla_max_days + (sla.sla_max_days - sla.sla_min_days))
-                        THEN 'ACCEPTABLE'
-                    ELSE 'DELAY'
-                END as performance_label,
                 
                 sla.sla_hired_count as hired_count,
                 p.tpk_jumlah as target_count,
@@ -366,19 +356,41 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
             ORDER BY sla.sla_completed_at DESC
         `);
 
-        const totalRecords = rows.length;
-        const avgGross = totalRecords > 0 ? rows.reduce((s, r) => s + r.gross_duration_days, 0) / totalRecords : 0;
-        const avgNet = totalRecords > 0 ? rows.reduce((s, r) => s + r.net_duration_days, 0) / totalRecords : 0;
-        const totalBuffer = rows.reduce((s, r) => s + r.no_show_buffer_days, 0);
+        // ✅ HITUNG MENGGUNAKAN HARI KERJA (NODE.JS)
+        const processedRows = rows.map(row => {
+            const grossDays = countWorkdays(row.start_date, row.completion_date);
+            const netDays = Math.max(0, grossDays - row.no_show_buffer_days);
+            
+            let kpiStatus = 'DELAY';
+            if (netDays <= row.standard_lead_time) {
+                kpiStatus = 'EXCELLENT';
+            } else if (netDays <= row.sla_max_days) {
+                kpiStatus = 'GOOD';
+            } else if (netDays <= (row.sla_max_days + (row.sla_max_days - row.standard_lead_time))) {
+                kpiStatus = 'ACCEPTABLE';
+            }
 
-        const excellentCount  = rows.filter(r => r.performance_label === 'EXCELLENT').length;
-        const goodCount       = rows.filter(r => r.performance_label === 'GOOD').length;
-        const acceptableCount = rows.filter(r => r.performance_label === 'ACCEPTABLE').length;
-        const delayCount      = rows.filter(r => r.performance_label === 'DELAY').length;
+            return {
+                ...row,
+                gross_duration_days: grossDays,
+                net_duration_days: netDays,
+                performance_label: kpiStatus
+            };
+        });
+
+        const totalRecords = processedRows.length;
+        const avgGross = totalRecords > 0 ? processedRows.reduce((s, r) => s + r.gross_duration_days, 0) / totalRecords : 0;
+        const avgNet = totalRecords > 0 ? processedRows.reduce((s, r) => s + r.net_duration_days, 0) / totalRecords : 0;
+        const totalBuffer = processedRows.reduce((s, r) => s + r.no_show_buffer_days, 0);
+
+        const excellentCount  = processedRows.filter(r => r.performance_label === 'EXCELLENT').length;
+        const goodCount       = processedRows.filter(r => r.performance_label === 'GOOD').length;
+        const acceptableCount = processedRows.filter(r => r.performance_label === 'ACCEPTABLE').length;
+        const delayCount      = processedRows.filter(r => r.performance_label === 'DELAY').length;
 
         res.json({
             success: true,
-            data: rows,
+            data: processedRows, // Kembalikan array yang sudah diproses
             summary: {
                 period: period || 'all_time',
                 total_completed: totalRecords,
@@ -392,7 +404,7 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
             },
             insights: {
                 fairness_note: 'Net Duration = Gross Duration - No-Show Buffer',
-                explanation: 'HRD tidak dipenalti untuk waktu yang hilang karena kandidat No-Show'
+                explanation: 'Perhitungan menggunakan Hari Kerja (Workdays), mengabaikan hari libur.'
             }
         });
 

@@ -2,6 +2,7 @@
 const express = require('express');
 const db = require('../config/db');
 const { authenticate, isHRD } = require('../middleware/authMiddleware');
+const { countWorkdays } = require('../utils/workdayCalculator');
 const router = express.Router();
 
 /**
@@ -444,29 +445,39 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
                 j.jab_nama,
                 sla.sla_min_days,
                 sla.sla_max_days,
-                DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) as duration_calendar,
+                sla.sla_calculated_at,
+                sla.sla_completed_at,
                 sla.sla_no_show_buffer_days as buffer_noshow,
-                (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) as net_hrd_duration,
                 p.tpk_jumlah as target_count,
-                sla.sla_hired_count as hired_count,
-                CASE 
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_min_days THEN 'EXCELLENT'
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= sla.sla_max_days THEN 'GOOD'
-                    WHEN (DATEDIFF(sla.sla_completed_at, sla.sla_calculated_at) - sla.sla_no_show_buffer_days) <= (sla.sla_max_days + (sla.sla_max_days - sla.sla_min_days)) THEN 'ACCEPTABLE'
-                    ELSE 'DELAY'
-                END as kpi_status
+                sla.sla_hired_count as hired_count
             FROM t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             WHERE sla.sla_status = 'COMPLETED'
         `);
 
-        const processedData = rows.map(row => ({
-            ...row,
-            score: row.net_hrd_duration <= row.sla_min_days 
+        // ✅ HITUNG MENGGUNAKAN HARI KERJA
+        const processedData = rows.map(row => {
+            const grossDays = countWorkdays(row.sla_calculated_at, row.sla_completed_at);
+            const netDuration = Math.max(0, grossDays - row.buffer_noshow);
+            
+            let kpiStatus = 'DELAY';
+            if (netDuration <= row.sla_min_days) kpiStatus = 'EXCELLENT';
+            else if (netDuration <= row.sla_max_days) kpiStatus = 'GOOD';
+            else if (netDuration <= (row.sla_max_days + (row.sla_max_days - row.sla_min_days))) kpiStatus = 'ACCEPTABLE';
+
+            const score = netDuration <= row.sla_min_days 
                 ? 100 
-                : Math.max(0, 100 - (row.net_hrd_duration - row.sla_min_days) * 5)
-        }));
+                : Math.max(0, 100 - (netDuration - row.sla_min_days) * 5);
+
+            return {
+                ...row,
+                duration_calendar: grossDays, // Diganti jadi Workdays
+                net_hrd_duration: netDuration,
+                kpi_status: kpiStatus,
+                score: score
+            };
+        });
 
         res.json({
             success: true,
