@@ -29,8 +29,11 @@ const runSlaSync = async () => {
             // Sebelumnya SUM(rpk_jumlah) bisa menghasilkan angka berbeda jika satu baris
             // memiliki rpk_jumlah > 1, menyebabkan drift antara data cron dan data real-time.
             // COUNT(*) = "1 baris = 1 orang hired" → sinkron dengan logika -1 di cancel-candidate.
+            // ✅ ANTI-JEBOL CRON JOB
             const [hiredData] = await connection.query(`
-                SELECT rpk_tpk_nomor AS tlp_tpk_nomor, COUNT(*) as total_hired 
+                SELECT 
+                    rpk_tpk_nomor AS tlp_tpk_nomor, 
+                    SUM(GREATEST(COALESCE(rpk_jumlah, 1), 1)) as total_hired 
                 FROM triilpermintaankaryawan 
                 WHERE rpk_tpk_nomor IN (${placeholders})
                 GROUP BY rpk_tpk_nomor

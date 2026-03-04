@@ -923,7 +923,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
  * Dipakai ketika rekrutmen sudah selesai di aplikasi lama tapi SLA belum COMPLETED
  */
 router.post('/complete', authenticate, isHRD, async (req, res) => {
-    const { tpk_nomor, hired_count } = req.body;
+    const { tpk_nomor } = req.body;
     const userKode = req.user.user_kode;
 
     if (!tpk_nomor) {
@@ -936,7 +936,7 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
         await conn.beginTransaction();
 
         const [check] = await conn.execute(
-            'SELECT sla_status, sla_hired_count FROM t_recruitment_sla WHERE sla_tpk_nomor = ? FOR UPDATE',
+            'SELECT sla_status FROM t_recruitment_sla WHERE sla_tpk_nomor = ? FOR UPDATE',
             [tpk_nomor]
         );
 
@@ -950,23 +950,17 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Permintaan sudah selesai' });
         }
 
-        const finalHiredCount = (hired_count !== undefined && hired_count !== null)
-            ? hired_count
-            : check[0].sla_hired_count;
-
-        // 1. Update SLA
+        // ✅ FIX: Hapus sla_hired_count = ? dari update ini
         await conn.execute(
             `UPDATE t_recruitment_sla
              SET sla_status       = 'COMPLETED',
                  sla_completed_at = NOW(),
                  sla_is_editable  = 0,
-                 sla_hired_count  = ?,
-                 sla_notes        = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Ditutup manual oleh HRD.')
+                 sla_notes        = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Ditutup manual oleh HRD. Progress sesuai data riil.')
              WHERE sla_tpk_nomor = ?`,
-            [finalHiredCount, tpk_nomor]
+            [tpk_nomor]
         );
 
-        // 2. Insert Log agar muncul di "Riwayat Perubahan"
         await conn.execute(
             `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value) 
              VALUES (?, ?, 'status_sla', 'CALCULATED', 'COMPLETED (Tutup Manual)')`,
@@ -1215,6 +1209,9 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
 // GET HIRED CANDIDATES (Daftar Kandidat Diterima)
 // =========================================================================
 // ✅ FIX #1: Tambah middleware authenticate — sebelumnya route ini terbuka tanpa auth
+// =========================================================================
+// GET HIRED CANDIDATES (Daftar Kandidat Diterima)
+// =========================================================================
 router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
     try {
         const { tpkNomor } = req.params;
@@ -1222,12 +1219,40 @@ router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
             SELECT 
                 rpk_nomor AS rkt_nomor, 
                 rpk_keterangannama AS nama, 
-                rpk_tanggal AS tgl_diterima 
+                rpk_tanggal AS tgl_diterima,
+                COALESCE(rpk_jumlah, 1) as rpk_jumlah
             FROM triilpermintaankaryawan
             WHERE rpk_tpk_nomor = ?
         `, [tpkNomor]);
 
-        res.json({ success: true, data: rows });
+        const processedCandidates = [];
+
+        rows.forEach(row => {
+            const rawNama = row.nama || 'Tanpa Nama';
+            
+            // ✅ FIX: Jika ada ENTER, pecah jadi beberapa orang
+            if (rawNama.includes('\n')) {
+                const splitNames = rawNama.split(/\r?\n/).filter(n => n.trim() !== '');
+                splitNames.forEach(namePiece => {
+                    processedCandidates.push({
+                        rkt_nomor: row.rkt_nomor,
+                        nama: namePiece.trim(),
+                        tgl_diterima: row.tgl_diterima,
+                        is_grouped: true // Penanda data borongan
+                    });
+                });
+            } else {
+                // Normal
+                processedCandidates.push({
+                    rkt_nomor: row.rkt_nomor,
+                    nama: rawNama.trim(),
+                    tgl_diterima: row.tgl_diterima,
+                    is_grouped: row.rpk_jumlah > 1
+                });
+            }
+        });
+
+        res.json({ success: true, data: processedCandidates });
     } catch (error) {
         console.error('Error fetching hired candidates:', error);
         res.status(500).json({ success: false, message: 'Server error' });
@@ -1245,27 +1270,33 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
         await connection.beginTransaction();
         const { tpkNomor } = req.params;
         const { rktNomor, bufferDays, keterangan } = req.body;
-
-        // ✅ FIX #2b: Gunakan user_kode (snake_case) sesuai authMiddleware.js
-        // req.user di-set oleh middleware authenticate dengan field: user_kode, user_nama, user_hrd
         const userKode = req.user.user_kode;
 
-        // 1. Ambil Nama Kandidat dari tabel realisasi (karena rktNomor disini adalah rpk_nomor)
         const [realisasi] = await connection.query(
-            'SELECT rpk_keterangannama FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
+            'SELECT rpk_keterangannama, COALESCE(rpk_jumlah, 1) as rpk_jumlah FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
             [tpkNomor, rktNomor]
         );
 
-        let namaKandidat = null;
-        if (realisasi.length > 0) {
-            namaKandidat = realisasi[0].rpk_keterangannama;
-            
-            // 2. Hapus data dari Muara (Tabel Realisasi)
-            await connection.query(
-                'DELETE FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
-                [tpkNomor, rktNomor]
-            );
+        if (realisasi.length === 0) {
+            await connection.rollback();
+            return res.status(404).json({ success: false, message: 'Kandidat tidak ditemukan' });
         }
+
+        // ✅ PROTEKSI ANTI-JEBOL: Cegah penghapusan jika ini data massal/borongan (Ada ENTER atau jumlah > 1)
+        const namaKandidat = realisasi[0].rpk_keterangannama || '';
+        if (realisasi[0].rpk_jumlah > 1 || namaKandidat.includes('\n')) {
+            await connection.rollback();
+            return res.status(400).json({ 
+                success: false, 
+                message: 'Data kandidat ini diinput secara grup (borongan) di sistem lama. Harap lakukan pembatalan manual melalui Aplikasi HRD Desktop agar data lain tidak terhapus.' 
+            });
+        }
+        
+        // 2. Hapus data dari Muara (Aman karena ini data 1 orang tunggal)
+        await connection.query(
+            'DELETE FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
+            [tpkNomor, rktNomor]
+        );
 
         // 3. SAPU BERSIH: Update histori tlistpelamar jika HRD ternyata memakai fitur lama
         // (Sistem mencari berdasarkan kecocokan nama pelamar)
