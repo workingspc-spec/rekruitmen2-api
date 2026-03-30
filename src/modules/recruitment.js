@@ -1298,16 +1298,7 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
             [tpkNomor, rktNomor]
         );
 
-        // 3. SAPU BERSIH: Update histori tlistpelamar jika HRD ternyata memakai fitur lama
-        // (Sistem mencari berdasarkan kecocokan nama pelamar)
-        if (namaKandidat) {
-            await connection.query(`
-                UPDATE tlistpelamar lp
-                JOIN trekruitmen r ON r.rkt_nomor = lp.tlp_rkt_nomor
-                SET lp.statusterakhir = 2
-                WHERE lp.tlp_tpk_nomor = ? AND r.rkt_nama = ?
-            `, [tpkNomor, namaKandidat]);
-        }
+        // ← baris 15-24 dihapus di sini, langsung lanjut ke Step 4
 
         // 4. UPDATE SLA: Kurangi hired count, tambah buffer, turunkan status ke CALCULATED
         await connection.query(`
