@@ -77,7 +77,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 CASE WHEN k.kar_nik_atasan = ? THEN 1 ELSE 0 END as is_bawahan
                 
             FROM tpermintaankaryawan p
-            JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+            JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
             LEFT JOIN tkaryawan approver ON approver.kar_nik = k.kar_nik_atasan
@@ -178,7 +178,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                     WHEN sla.sla_approval_delay_days > 5 THEN 'APPROVAL_DELAYED'
                     ELSE NULL
                 END AS approval_flag
-             FROM t_recruitment_sla sla
+             FROM pkar.t_recruitment_sla sla
              JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
              JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
@@ -200,7 +200,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                 l.user_kode,
                 k.kar_nama AS user_nama,
                 DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-             FROM t_pkar_log l
+             FROM pkar.t_pkar_log l
              LEFT JOIN tkaryawan k ON k.kar_Nik = l.user_kode
              WHERE l.tpk_nomor = ?
              ORDER BY l.created_at DESC`,
@@ -288,7 +288,7 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
                     WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'  /* [UBAH] */
                     ELSE 'ON_PROGRESS'
                 END AS ui_status
-             FROM t_recruitment_sla sla
+             FROM pkar.t_recruitment_sla sla
              JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
              JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
              WHERE sla.sla_tpk_nomor = ?`,
@@ -347,7 +347,7 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
                 p.tpk_jumlah as target_count,
                 sla.sla_source
                 
-            FROM t_recruitment_sla sla
+            FROM pkar.t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
@@ -453,7 +453,7 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
                     WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 5 THEN 'STANDARD_REVIEW'
                     ELSE 'EXTENDED_REVIEW'
                 END AS approval_performance
-            FROM t_recruitment_sla sla
+            FROM pkar.t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan peminta ON peminta.kar_nik = p.tpk_peminta
@@ -474,7 +474,7 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
                 SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) <= 2 THEN 1 ELSE 0 END) AS fast_track_count,
                 SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) BETWEEN 3 AND 5 THEN 1 ELSE 0 END) AS standard_review_count,
                 SUM(CASE WHEN DATEDIFF(sla.sla_approved_at, p.tpk_tanggal) > 5 THEN 1 ELSE 0 END) AS extended_review_count
-            FROM t_recruitment_sla sla
+            FROM pkar.t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             LEFT JOIN tkaryawan peminta ON peminta.kar_nik = p.tpk_peminta
             LEFT JOIN tkaryawan approver ON approver.kar_nik = peminta.kar_nik_atasan
@@ -546,7 +546,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             `SELECT COUNT(*) as count
              FROM tpermintaankaryawan p
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
-             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+             JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause} ${andOrWhere} sla.sla_status = 'CALCULATED'`,
             params
         );
@@ -555,7 +555,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             `SELECT COUNT(*) as count
              FROM tpermintaankaryawan p
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
-             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+             JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause} ${andOrWhere} sla.sla_status = 'CALCULATED'
              AND CURDATE() > sla.sla_max_target_date`, 
             params
@@ -565,7 +565,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             `SELECT COUNT(*) as count
              FROM tpermintaankaryawan p
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
-             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+             JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause} ${andOrWhere} sla.sla_status = 'CALCULATED'
              AND sla.sla_is_editable = 1`,
             params
@@ -575,7 +575,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             `SELECT COUNT(*) as count
              FROM tpermintaankaryawan p
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
-             JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+             JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause} ${andOrWhere} sla.sla_status = 'COMPLETED'
              AND sla.sla_completed_at IS NOT NULL
              AND YEAR(sla.sla_completed_at) = YEAR(CURDATE())
@@ -619,7 +619,7 @@ router.get('/check-deadline', authenticate, isHRD, async (req, res) => {
                 sla.sla_final_target_date,
                 sla.sla_max_target_date,
                 DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining /* [UBAH] Gunakan max_target_date */
-            FROM t_recruitment_sla sla
+            FROM pkar.t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta

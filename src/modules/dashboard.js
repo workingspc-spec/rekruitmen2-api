@@ -112,7 +112,7 @@ router.get('/stats', authenticate, async (req, res) => {
                     SUM(CASE WHEN sla_status = 'COMPLETED' THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN sla_is_editable = 1 THEN 1 ELSE 0 END) as need_user_update,
                     SUM(CASE WHEN sla_status = 'CALCULATED' AND CURDATE() > sla_max_target_date THEN 1 ELSE 0 END) as overdue /* DIPERBAIKI */
-                FROM t_recruitment_sla
+                FROM pkar.t_recruitment_sla
             `);
             slaStats = sla[0];
         }
@@ -258,7 +258,7 @@ router.get('/charts-data', authenticate, async (req, res) => {
                     SUM(CASE WHEN sla_source = 'SYSTEM' THEN 1 ELSE 0 END) as system_adjusted,
                     SUM(CASE WHEN sla_source = 'USER' THEN 1 ELSE 0 END) as user_met,
                     SUM(CASE WHEN sla_source = 'FLEXIBLE' THEN 1 ELSE 0 END) as flexible
-                FROM t_recruitment_sla
+                FROM pkar.t_recruitment_sla
                 WHERE sla_status IN ('CALCULATED', 'COMPLETED')
             `);
 
@@ -307,7 +307,7 @@ router.get('/sla-analysis', authenticate, isHRD, async (req, res) => {
                 SUM(CASE WHEN sla_source = 'FLEXIBLE' THEN 1 ELSE 0 END) as flexible,
                 AVG(sla_user_vs_system_diff_days) as avg_extension_days,
                 MAX(sla_user_vs_system_diff_days) as max_extension_days
-            FROM t_recruitment_sla
+            FROM pkar.t_recruitment_sla
             ${whereClause}
         `, params);
 
@@ -356,7 +356,7 @@ router.get('/sla-by-job', authenticate, isHRD, async (req, res) => {
                 AVG(sla_user_vs_system_diff_days) as avg_extension,
                 SUM(CASE WHEN sla_source = 'SYSTEM' THEN 1 ELSE 0 END) as system_count,
                 SUM(CASE WHEN sla_source = 'USER' THEN 1 ELSE 0 END) as user_count
-            FROM t_recruitment_sla sla
+            FROM pkar.t_recruitment_sla sla
             LEFT JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             WHERE YEAR(sla_request_created_at) = ? AND sla_status = 'CALCULATED'
             GROUP BY sla_job_code, j.jab_nama
@@ -397,7 +397,7 @@ router.get('/sla-performance', authenticate, isHRD, async (req, res) => {
                 AVG(DATEDIFF(sla_max_target_date, sla_completed_at)) as avg_vs_target,
                 SUM(CASE WHEN sla_completed_at <= sla_max_target_date THEN 1 ELSE 0 END) as ontime_count,
                 SUM(CASE WHEN sla_completed_at > sla_max_target_date THEN 1 ELSE 0 END) as late_count
-            FROM t_recruitment_sla
+            FROM pkar.t_recruitment_sla
             ${whereClause}
         `, params);
 
@@ -450,7 +450,7 @@ router.get('/hrd-kpi-report', authenticate, isHRD, async (req, res) => {
                 sla.sla_no_show_buffer_days as buffer_noshow,
                 p.tpk_jumlah as target_count,
                 sla.sla_hired_count as hired_count
-            FROM t_recruitment_sla sla
+            FROM pkar.t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             WHERE sla.sla_status = 'COMPLETED'
@@ -532,7 +532,7 @@ router.get('/sla-summary', authenticate, async (req, res) => {
                 SUM(CASE WHEN sla.sla_is_editable = 1 THEN 1 ELSE 0 END) as pending_user_edit,
                 AVG(DATEDIFF(sla.sla_max_target_date, CURDATE())) as avg_days_remaining
             FROM tpermintaankaryawan p
-            JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+            JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             ${whereClause}
         `, params);
 

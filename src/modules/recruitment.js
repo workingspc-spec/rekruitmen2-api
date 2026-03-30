@@ -39,7 +39,7 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
             `SELECT COALESCE(jlt.jlt_min_days, 7) as min_days, 
                     COALESCE(jlt.jlt_is_flexible, 0) as is_flexible
              FROM tjabatan j
-             LEFT JOIN job_lead_time_master jlt 
+             LEFT JOIN pkar.job_lead_time_master jlt 
                 ON jlt.jlt_job_code = j.jab_kode AND jlt.jlt_active = 1
              WHERE j.jab_kode = ?`,
             [jab_kode]
@@ -95,7 +95,7 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
                     ELSE CONCAT('Minimal ', COALESCE(jlt.jlt_min_days, 7), ' hari kerja')
                 END as label
             FROM tjabatan j
-            LEFT JOIN job_lead_time_master jlt 
+            LEFT JOIN pkar.job_lead_time_master jlt 
                 ON jlt.jlt_job_code = j.jab_kode AND jlt.jlt_active = 1
             ORDER BY j.jab_nama
         `);
@@ -148,7 +148,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 COALESCE(sla.sla_is_editable, 0) as sla_is_editable
             FROM tpermintaankaryawan p
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
-            LEFT JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+            LEFT JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE ${whereClause}
             ORDER BY p.tpk_tanggal DESC
         `, params);
@@ -213,7 +213,7 @@ router.get('/detail', authenticate, async (req, res) => {
                 sla.sla_hired_count
             FROM tpermintaankaryawan t
             JOIN tjabatan j ON j.jab_kode = t.tpk_jab_kode
-            LEFT JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = t.tpk_nomor
+            LEFT JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = t.tpk_nomor
             WHERE t.tpk_nomor = ?
         `, [nomor]);
 
@@ -257,7 +257,7 @@ router.post('/save', authenticate, async (req, res) => {
 
             if (jab_kode && tgl_butuh) {
                 const [slaCheck] = await connection.execute(
-                    'SELECT sla_is_editable FROM t_recruitment_sla WHERE sla_tpk_nomor = ?',
+                    'SELECT sla_is_editable FROM pkar.t_recruitment_sla WHERE sla_tpk_nomor = ?',
                     [tpk_nomor]
                 );
                 const isReSchedule = slaCheck.length > 0 && slaCheck[0].sla_is_editable === 1;
@@ -285,7 +285,7 @@ router.post('/save', authenticate, async (req, res) => {
                     p.tpk_jab_kode,
                     s.sla_is_editable
                 FROM tpermintaankaryawan p
-                LEFT JOIN t_recruitment_sla s ON s.sla_tpk_nomor = p.tpk_nomor
+                LEFT JOIN pkar.t_recruitment_sla s ON s.sla_tpk_nomor = p.tpk_nomor
                 WHERE p.tpk_nomor = ?
                 FOR UPDATE`,
                 [tpk_nomor]
@@ -323,7 +323,7 @@ router.post('/save', authenticate, async (req, res) => {
             // Re-schedule: update SLA dan buka kunci
             if (isEditable) {
                 await connection.execute(
-                    `UPDATE t_recruitment_sla SET
+                    `UPDATE pkar.t_recruitment_sla SET
                         sla_job_code = ?,
                         sla_original_requested_date = ?,
                         sla_system_ceiling_date = ?,
@@ -386,7 +386,7 @@ router.post('/save', authenticate, async (req, res) => {
             for (const c of changes) {
                 if (String(c.old) !== String(c.new)) {
                     await connection.execute(
-                        `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
+                        `INSERT INTO pkar.t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
                          VALUES (?, ?, ?, ?, ?)`,
                         [tpk_nomor, user_kode, c.field,
                          c.old !== null ? String(c.old) : null,
@@ -400,7 +400,7 @@ router.post('/save', authenticate, async (req, res) => {
             // tidak akan match (dead code). Dibungkus isDraft agar eksplisit & tidak membingungkan.
             if (isDraft) {
                 await connection.execute(
-                    `UPDATE t_recruitment_sla
+                    `UPDATE pkar.t_recruitment_sla
                      SET sla_job_code = ?,
                          sla_original_requested_date = ?,
                          sla_system_ceiling_date = ?
@@ -495,7 +495,7 @@ router.post('/save', authenticate, async (req, res) => {
             ]);
 
             await connection.execute(
-                `INSERT INTO t_recruitment_sla (
+                `INSERT INTO pkar.t_recruitment_sla (
                     sla_tpk_nomor, sla_job_code,
                     sla_original_requested_date, sla_system_ceiling_date,
                     sla_request_created_at, sla_status
@@ -609,7 +609,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                 sla.sla_request_created_at
              FROM tpermintaankaryawan p
              LEFT JOIN tkaryawan k ON k.kar_Nik = p.tpk_peminta
-             LEFT JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+             LEFT JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              WHERE p.tpk_nomor = ?
              FOR UPDATE`,
             [tpk_nomor]
@@ -643,7 +643,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         // ========== APPROVE: Hitung SLA ==========
         if (statusVal === 1) {
             const [masterData] = await connection.execute(
-                'SELECT jlt_min_days, jlt_max_days, jlt_is_flexible FROM job_lead_time_master WHERE jlt_job_code = ? AND jlt_active = 1',
+                'SELECT jlt_min_days, jlt_max_days, jlt_is_flexible FROM pkar.job_lead_time_master WHERE jlt_job_code = ? AND jlt_active = 1',
                 [data.tpk_jab_kode]
             );
 
@@ -719,7 +719,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                 : '';
 
             await connection.execute(
-                `UPDATE t_recruitment_sla SET
+                `UPDATE pkar.t_recruitment_sla SET
                     sla_approved_at               = NOW(),
                     sla_calculated_at             = NOW(),
                     sla_min_days                  = ?,
@@ -775,7 +775,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         // ========== REJECT: Batalkan SLA ==========
         } else {
             await connection.execute(
-                'UPDATE t_recruitment_sla SET sla_status = "CANCELLED" WHERE sla_tpk_nomor = ?',
+                'UPDATE pkar.t_recruitment_sla SET sla_status = "CANCELLED" WHERE sla_tpk_nomor = ?',
                 [tpk_nomor]
             );
 
@@ -823,7 +823,7 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             FROM tpermintaankaryawan p
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            LEFT JOIN t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+            LEFT JOIN pkar.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE p.tpk_approveatasan = 1
         `;
 
@@ -896,7 +896,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         // Status tetap CALCULATED — akan jadi COMPLETED otomatis via trigger DB (sync_sla_hired_count)
         // atau manual via endpoint /complete
         await connection.execute(
-            `UPDATE t_recruitment_sla
+            `UPDATE pkar.t_recruitment_sla
              SET sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] HRD approve — rekrutmen dibuka.')
              WHERE sla_tpk_nomor = ? AND sla_status = 'CALCULATED'`,
             [tpk_nomor]
@@ -936,7 +936,7 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
         await conn.beginTransaction();
 
         const [check] = await conn.execute(
-            'SELECT sla_status FROM t_recruitment_sla WHERE sla_tpk_nomor = ? FOR UPDATE',
+            'SELECT sla_status FROM pkar.t_recruitment_sla WHERE sla_tpk_nomor = ? FOR UPDATE',
             [tpk_nomor]
         );
 
@@ -952,7 +952,7 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
 
         // ✅ FIX: Hapus sla_hired_count = ? dari update ini
         await conn.execute(
-            `UPDATE t_recruitment_sla
+            `UPDATE pkar.t_recruitment_sla
              SET sla_status       = 'COMPLETED',
                  sla_completed_at = NOW(),
                  sla_is_editable  = 0,
@@ -962,7 +962,7 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
         );
 
         await conn.execute(
-            `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value) 
+            `INSERT INTO pkar.t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value) 
              VALUES (?, ?, 'status_sla', 'CALCULATED', 'COMPLETED (Tutup Manual)')`,
             [tpk_nomor, userKode]
         );
@@ -1021,7 +1021,7 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
                 log.user_kode,
                 k.kar_nama as user_nama,
                 DATE_FORMAT(log.created_at, '%Y-%m-%d %H:%i:%s') as created_at
-             FROM t_pkar_log log
+             FROM pkar.t_pkar_log log
              LEFT JOIN tkaryawan k ON k.kar_nik = log.user_kode
              WHERE log.tpk_nomor = ?
              ORDER BY log.created_at DESC`,
@@ -1061,7 +1061,7 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
 
         const [slaRows] = await conn.query(
             `SELECT sla_id, sla_is_editable, sla_status
-             FROM t_recruitment_sla
+             FROM pkar.t_recruitment_sla
              WHERE sla_tpk_nomor = ?`,
             [tpkNomor]
         );
@@ -1085,7 +1085,7 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
         }
 
         await conn.query(
-            `UPDATE t_recruitment_sla SET sla_is_editable = ? WHERE sla_tpk_nomor = ?`,
+            `UPDATE pkar.t_recruitment_sla SET sla_is_editable = ? WHERE sla_tpk_nomor = ?`,
             [isEditable, tpkNomor]
         );
 
@@ -1095,7 +1095,7 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
             : `Izin edit ditutup oleh HRD`;
 
         await conn.query(
-            `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
+            `INSERT INTO pkar.t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
              VALUES (?, ?, ?, ?, ?)`,
             [
                 tpkNomor,
@@ -1108,7 +1108,7 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
 
         if (isEditable === 1 && keterangan) {
             await conn.query(
-                `UPDATE t_recruitment_sla
+                `UPDATE pkar.t_recruitment_sla
                  SET sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] HRD minta update tanggal: ', ?)
                  WHERE sla_tpk_nomor = ?`,
                 [keterangan.trim(), tpkNomor]
@@ -1162,7 +1162,7 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
 
     const [slaRows] = await conn.query(
       `SELECT sla_id, sla_no_show_buffer_days, sla_status, sla_hired_count
-       FROM t_recruitment_sla WHERE sla_tpk_nomor = ?`, [tpkNomor]
+       FROM pkar.t_recruitment_sla WHERE sla_tpk_nomor = ?`, [tpkNomor]
     );
 
     if (slaRows.length === 0) { await conn.rollback(); return res.status(404).json({ success: false, message: 'SLA tidak ditemukan' }); }
@@ -1185,13 +1185,13 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
     }
 
     await conn.query(
-      `UPDATE t_recruitment_sla
+      `UPDATE pkar.t_recruitment_sla
        SET sla_no_show_buffer_days = ? ${statusUpdateQuery}
        WHERE sla_tpk_nomor = ?`, [newBuffer, tpkNomor]
     );
 
     await conn.query(
-      `INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value) VALUES (?, ?, 'no_show_buffer', ?, ?)`,
+      `INSERT INTO pkar.t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value) VALUES (?, ?, 'no_show_buffer', ?, ?)`,
       [tpkNomor, userKode, `${oldBuffer} hari`, `${newBuffer} hari (+${bufferDays}) — ${keterangan.trim()}`]
     );
 
@@ -1302,7 +1302,7 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
 
         // 4. UPDATE SLA: Kurangi hired count, tambah buffer, turunkan status ke CALCULATED
         await connection.query(`
-            UPDATE t_recruitment_sla 
+            UPDATE pkar.t_recruitment_sla 
             SET 
                 sla_hired_count = GREATEST(0, sla_hired_count - 1),
                 sla_status = 'CALCULATED',
@@ -1314,7 +1314,7 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
         // 5. Catat Log
         const logNotes = `Kandidat dibatalkan (No-Show). Buffer +${bufferDays} hari ditambahkan. Alasan: ${keterangan}`;
         await connection.query(`
-            INSERT INTO t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
+            INSERT INTO pkar.t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
             VALUES (?, ?, 'cancel_candidate', 'Hired', ?)
         `, [tpkNomor, userKode, logNotes]);
 
@@ -1368,13 +1368,13 @@ router.delete('/batch-delete', authenticate, async (req, res) => {
     // 1. Tulis log audit SEBELUM delete
     const logValues = tpkNomors.map(nomor => [nomor, 'batch_deleted', 'PENDING', 'DELETED_BY_USER', userKode]);
     await conn.query(
-      `INSERT INTO t_pkar_log (tpk_nomor, field_name, old_value, new_value, user_kode, created_at) VALUES ?`,
+      `INSERT INTO pkar.t_pkar_log (tpk_nomor, field_name, old_value, new_value, user_kode, created_at) VALUES ?`,
       [logValues.map(v => [...v, new Date()])]
     );
 
-    // 2. Delete dari t_recruitment_sla (lokal — bisa pakai transaction)
+    // 2. Delete dari pkar.t_recruitment_sla (lokal — bisa pakai transaction)
     await conn.execute(
-      `DELETE FROM t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders}) AND sla_status = 'PENDING'`,
+      `DELETE FROM pkar.t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders}) AND sla_status = 'PENDING'`,
       tpkNomors
     );
 
