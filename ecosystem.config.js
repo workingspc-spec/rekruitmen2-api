@@ -1,9 +1,10 @@
 module.exports = {
   apps: [
     {
-      name: 'backend-rekruitmen',
+      name: 'backend-pkar',
       script: 'app.js',
 
+      exec_mode: 'fork',
       // 🔹 Mode cluster TIDAK perlu dulu (karena DB remote)
       instances: 1,
 
@@ -35,7 +36,7 @@ module.exports = {
 
       env_production: {
         NODE_ENV: 'production',
-        PORT: 3100
+        PORT: 3006
       },
 
       // =========================
