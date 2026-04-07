@@ -14,7 +14,7 @@ const runSlaSync = async () => {
 
         // 1. Cari tiket (tpk_nomor) yang SLA-nya masih berjalan (belum complete/cancelled)
         const [activeSlas] = await connection.query(
-            `SELECT sla_tpk_nomor FROM pkar.t_recruitment_sla WHERE sla_status IN ('PENDING', 'CALCULATED')`
+            `SELECT sla_tpk_nomor FROM rekruitmen2.t_recruitment_sla WHERE sla_status IN ('PENDING', 'CALCULATED')`
         );
 
         if (activeSlas.length > 0) {
@@ -53,18 +53,18 @@ const runSlaSync = async () => {
             ]);
 
             await connection.query(`
-                UPDATE pkar.t_recruitment_sla
+                UPDATE rekruitmen2.t_recruitment_sla
                 SET sla_hired_count = CASE sla_tpk_nomor ${caseStatements} END
                 WHERE sla_tpk_nomor IN (${placeholders})
             `, [...flatValues, ...tpkNomors]);
 
             // 4. Auto-complete jika target terpenuhi
             //    ✅ FIX: Gunakan query SELECT dulu agar kita tahu TPK mana saja yang akan
-            //    ditutup, sehingga bisa dicatat di log riwayat (pkar.t_pkar_log).
+            //    ditutup, sehingga bisa dicatat di log riwayat (rekruitmen2.t_pkar_log).
             //    ✅ FIX: Filter IN (tpkNomors) agar tidak scan seluruh tabel saat data besar.
             const [toComplete] = await connection.query(`
                 SELECT sla.sla_tpk_nomor
-                FROM pkar.t_recruitment_sla sla
+                FROM rekruitmen2.t_recruitment_sla sla
                 JOIN tpermintaankaryawan tpk ON sla.sla_tpk_nomor = tpk.tpk_nomor
                 WHERE sla.sla_hired_count >= tpk.tpk_jumlah 
                   AND sla.sla_status      = 'CALCULATED'
@@ -77,7 +77,7 @@ const runSlaSync = async () => {
 
                 // Update status SLA → COMPLETED
                 await connection.query(`
-                    UPDATE pkar.t_recruitment_sla 
+                    UPDATE rekruitmen2.t_recruitment_sla 
                     SET 
                         sla_status      = 'COMPLETED',
                         sla_completed_at = NOW(),
@@ -94,7 +94,7 @@ const runSlaSync = async () => {
                     tpk, 'SYSTEM', 'status_sla', 'CALCULATED', 'COMPLETED (Auto-Sync)'
                 ]);
                 await connection.query(`
-                    INSERT INTO pkar.t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
+                    INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, user_kode, field_name, old_value, new_value)
                     VALUES ?
                 `, [logValues]);
             }
