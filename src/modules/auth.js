@@ -40,7 +40,7 @@ router.post('/login', loginLimiter, async (req, res) => {
     try {
         const [rows] = await db.execute(
             `SELECT u.user_kode, u.user_nama, u.user_hrd, u.user_password, k.kar_bagian 
-             FROM tuser u 
+             FROM pkar.tuser u 
              LEFT JOIN tkaryawan k ON u.user_kode = k.kar_nik 
              WHERE u.user_kode = ?`, 
             [username]
@@ -127,7 +127,7 @@ router.post('/change-password', authenticate, async (req, res) => {
 
     try {
         const [rows] = await db.execute(
-            'SELECT user_password FROM tuser WHERE user_kode = ?', 
+            'SELECT user_password FROM pkar.tuser WHERE user_kode = ?', 
             [userKode]
         );
 
@@ -148,7 +148,7 @@ router.post('/change-password', authenticate, async (req, res) => {
 
         // Update password baru
         await db.execute(
-            'UPDATE tuser SET user_password = ? WHERE user_kode = ?',
+            'UPDATE pkar.tuser SET user_password = ? WHERE user_kode = ?',
             [newPassword, userKode]
         );
 
@@ -174,7 +174,7 @@ router.get('/me', authenticate, async (req, res) => {
     try {
         const [rows] = await db.execute(
             `SELECT u.user_kode, u.user_nama, u.user_hrd, k.kar_bagian 
-             FROM tuser u 
+             FROM pkar.tuser u 
              LEFT JOIN tkaryawan k ON u.user_kode = k.kar_nik 
              WHERE u.user_kode = ?`,
             [req.user.user_kode]
