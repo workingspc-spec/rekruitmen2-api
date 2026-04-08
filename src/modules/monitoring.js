@@ -191,6 +191,8 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Data SLA tidak ditemukan' });
         }
 
+        const sla = slaRows[0];
+
         const [editHistory] = await db.execute(
             `SELECT 
                 l.log_id,
@@ -200,14 +202,12 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                 l.user_kode,
                 k.kar_nama AS user_nama,
                 DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') AS created_at
-             FROM rekruitmen2.t_pkar_log l
-             LEFT JOIN tkaryawan k ON k.kar_Nik = l.user_kode
-             WHERE l.tpk_nomor = ?
-             ORDER BY l.created_at DESC`,
-            [tpk_nomor]
+            FROM rekruitmen2.t_pkar_log l
+            LEFT JOIN tkaryawan k ON k.kar_Nik = l.user_kode
+            WHERE (l.sla_id = ? OR (l.sla_id IS NULL AND l.tpk_nomor = ?))
+            ORDER BY l.created_at DESC`,
+            [sla.sla_id, tpk_nomor]
         );
-
-        const sla = slaRows[0];
 
         res.json({
             success: true,
