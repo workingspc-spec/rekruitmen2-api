@@ -7,14 +7,82 @@ const router = express.Router();
 
 /**
  * =====================================================================
- * MODULE: RECRUITMENT SLA MONITORING
- * Fokus: SLA tracking, KPI HRD, KPI Approver
+ * HELPER: Build KPI date filter — support semua format periode
+ * Konsisten dengan getDateFilter di dashboard.js
+ *
+ * Mendukung:
+ *  - null / '' / 'All Time' → semua data
+ *  - 'Today', 'Yesterday', 'This week', 'Last week'
+ *  - 'This month', 'Last month', 'This year', 'Last year'
+ *  - 'month', 'quarter', 'year'   ← nilai lama tetap jalan
+ *  - 'Custom: 2026-01-01 - 2026-03-31'
+ *  - '2026-01-01,2026-03-31'      ← format dari web frontend
  * =====================================================================
  */
+function buildKpiDateFilter(period, dateColumn) {
+    if (!period || period === 'All Time') {
+        return { sql: '', params: [] };
+    }
+
+    let condition = '';
+    const params  = [];
+
+    switch (period) {
+        case 'Today':
+            condition = `DATE(${dateColumn}) = CURDATE()`;
+            break;
+        case 'Yesterday':
+            condition = `DATE(${dateColumn}) = DATE_SUB(CURDATE(), INTERVAL 1 DAY)`;
+            break;
+        case 'This week':
+            condition = `YEARWEEK(${dateColumn}, 1) = YEARWEEK(CURDATE(), 1)`;
+            break;
+        case 'Last week':
+            condition = `YEARWEEK(${dateColumn}, 1) = YEARWEEK(CURDATE(), 1) - 1`;
+            break;
+        case 'This month':
+        case 'month':
+            condition = `MONTH(${dateColumn}) = MONTH(CURDATE()) AND YEAR(${dateColumn}) = YEAR(CURDATE())`;
+            break;
+        case 'Last month':
+            condition = `MONTH(${dateColumn}) = MONTH(DATE_SUB(CURDATE(), INTERVAL 1 MONTH)) AND YEAR(${dateColumn}) = YEAR(DATE_SUB(CURDATE(), INTERVAL 1 MONTH))`;
+            break;
+        case 'This year':
+        case 'year':
+            condition = `YEAR(${dateColumn}) = YEAR(CURDATE())`;
+            break;
+        case 'Last year':
+            condition = `YEAR(${dateColumn}) = YEAR(CURDATE()) - 1`;
+            break;
+        case 'quarter':
+            condition = `YEAR(${dateColumn}) = YEAR(CURDATE()) AND QUARTER(${dateColumn}) = QUARTER(CURDATE())`;
+            break;
+        default: {
+            // Format: 'Custom: 2026-01-01 - 2026-03-31'  atau  '2026-01-01,2026-03-31'
+            let rangeStr = period;
+            if (rangeStr.toLowerCase().startsWith('custom:')) {
+                rangeStr = rangeStr.replace(/custom:/i, '').trim();
+            }
+            // Normalise separator: bisa ' - ' atau ','
+            const parts = rangeStr.includes(',')
+                ? rangeStr.split(',')
+                : rangeStr.split(' - ');
+
+            if (parts.length === 2) {
+                const start = parts[0].trim();
+                const end   = parts[1].trim();
+                condition = `DATE(${dateColumn}) BETWEEN ? AND ?`;
+                params.push(start, end);
+            }
+            break;
+        }
+    }
+
+    return { sql: condition, params };
+}
 
 // =====================================================================
 // ROUTER 1: GET /api/monitoring/sla-status
-// PERUBAHAN: days_remaining & CASE WHEN ui_status_tag → pakai sla_max_target_date
 // =====================================================================
 router.get('/sla-status', authenticate, async (req, res) => {
     const { user_kode, user_hrd } = req.user;
@@ -55,7 +123,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 
                 approver.kar_nama AS approver_name,
                 
-                DATEDIFF(sla.sla_max_target_date, CURDATE()) as days_remaining, /* [UBAH] Gunakan max_target_date */
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) as days_remaining,
                 p.tpk_jumlah as target_count,
                 
                 ROUND((COALESCE(sla.sla_hired_count, 0) / NULLIF(p.tpk_jumlah, 0)) * 100) AS progress_percentage,
@@ -63,9 +131,9 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 CASE 
                     WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
-                    WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'          /* [UBAH] Patokan Overdue */
-                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL' /* [UBAH] */
-                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'  /* [UBAH] */
+                    WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'
                     ELSE 'ON_PROGRESS'
                 END as ui_status_tag,
                 
@@ -96,18 +164,18 @@ router.get('/sla-status', authenticate, async (req, res) => {
 
         const summary = {
             total_active: rows.filter(r => r.sla_status === 'CALCULATED').length,
-            need_update: rows.filter(r => r.sla_is_editable === 1).length,
-            overdue: rows.filter(r => r.ui_status_tag === 'OVERDUE').length,
-            critical: rows.filter(r => r.ui_status_tag === 'CRITICAL').length,
-            warning: rows.filter(r => r.ui_status_tag === 'WARNING').length,
-            on_progress: rows.filter(r => r.ui_status_tag === 'ON_PROGRESS').length,
-            total_hired: rows.reduce((sum, r) => sum + (Number(r.sla_hired_count) || 0), 0),
+            need_update:  rows.filter(r => r.sla_is_editable === 1).length,
+            overdue:      rows.filter(r => r.ui_status_tag === 'OVERDUE').length,
+            critical:     rows.filter(r => r.ui_status_tag === 'CRITICAL').length,
+            warning:      rows.filter(r => r.ui_status_tag === 'WARNING').length,
+            on_progress:  rows.filter(r => r.ui_status_tag === 'ON_PROGRESS').length,
+            total_hired:  rows.reduce((sum, r) => sum + (Number(r.sla_hired_count) || 0), 0),
             total_target: rows.reduce((sum, r) => sum + (Number(r.target_count) || 0), 0)
         };
 
         if (user_hrd !== 1) {
-            summary.monitoring_bawahan = rows.filter(r => r.is_bawahan === 1).length;
-            summary.permintaan_sendiri = rows.filter(r => r.is_bawahan === 0).length;
+            summary.monitoring_bawahan  = rows.filter(r => r.is_bawahan === 1).length;
+            summary.permintaan_sendiri  = rows.filter(r => r.is_bawahan === 0).length;
         }
 
         res.json({
@@ -115,28 +183,23 @@ router.get('/sla-status', authenticate, async (req, res) => {
             data: rows,
             summary,
             ui_hints: {
-                COMPLETED: 'Rekrutmen selesai',
+                COMPLETED:        'Rekrutmen selesai',
                 NEED_USER_UPDATE: 'Anda perlu mengubah tanggal target',
-                OVERDUE: 'Target sudah terlewat',
-                CRITICAL: '≤3 hari tersisa',
-                WARNING: '≤7 hari tersisa',
-                ON_PROGRESS: 'Berjalan normal'
+                OVERDUE:          'Target sudah terlewat',
+                CRITICAL:         '≤3 hari tersisa',
+                WARNING:          '≤7 hari tersisa',
+                ON_PROGRESS:      'Berjalan normal'
             }
         });
 
     } catch (error) {
         console.error('❌ Error monitoring SLA:', error.message);
-        res.status(500).json({
-            success: false,
-            message: 'Gagal mengambil data monitoring',
-            error: error.message
-        });
+        res.status(500).json({ success: false, message: 'Gagal mengambil data monitoring', error: error.message });
     }
 });
 
 // =====================================================================
 // ROUTER 2: GET /api/monitoring/sla-detail/:tpk_nomor
-// PERUBAHAN: days_remaining → max_target_date, tambah max_target_date di timeline response
 // =====================================================================
 router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
     const { tpk_nomor } = req.params;
@@ -172,7 +235,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                 p.tpk_bagian,
                 p.tpk_peminta,
                 k.kar_nama AS nama_peminta,
-                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining, /* [UBAH] Gunakan max_target_date */
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining,
                 approver.kar_nama AS approver_name,
                 CASE
                     WHEN sla.sla_approval_delay_days > 5 THEN 'APPROVAL_DELAYED'
@@ -214,20 +277,20 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
             data: {
                 sla_info: sla,
                 timeline: {
-                    request_created_at: sla.sla_request_created_at,
-                    approved_at: sla.sla_approved_at,
+                    request_created_at:   sla.sla_request_created_at,
+                    approved_at:          sla.sla_approved_at,
                     original_target_date: sla.sla_original_requested_date,
-                    system_floor_date: sla.sla_system_floor_date,
-                    final_target_date: sla.sla_final_target_date,
-                    max_target_date: sla.sla_max_target_date, /* [TAMBAHAN] Kirim ke Frontend */
-                    buffer_days_added: sla.sla_no_show_buffer_days,
-                    days_remaining: sla.days_remaining
+                    system_floor_date:    sla.sla_system_floor_date,
+                    final_target_date:    sla.sla_final_target_date,
+                    max_target_date:      sla.sla_max_target_date,
+                    buffer_days_added:    sla.sla_no_show_buffer_days,
+                    days_remaining:       sla.days_remaining
                 },
                 edit_history: editHistory,
                 approval_info: {
-                    approver_name: sla.approver_name,
+                    approver_name:       sla.approver_name,
                     approval_delay_days: sla.sla_approval_delay_days,
-                    approval_flag: sla.approval_flag
+                    approval_flag:       sla.approval_flag
                 }
             }
         });
@@ -240,7 +303,6 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
 
 // =====================================================================
 // ROUTER 3: GET /api/monitoring/sla-dashboard/:tpk_nomor
-// PERUBAHAN: days_remaining & CASE WHEN ui_status → pakai sla_max_target_date
 // =====================================================================
 router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
     const { tpk_nomor } = req.params;
@@ -279,13 +341,13 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
                 sla.sla_hired_count,
                 j.jab_nama,
                 p.tpk_jumlah,
-                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining, /* [UBAH] Gunakan max_target_date */
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining,
                 CASE
                     WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
-                    WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'          /* [UBAH] Patokan Overdue */
-                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL' /* [UBAH] */
-                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'  /* [UBAH] */
+                    WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
+                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'
                     ELSE 'ON_PROGRESS'
                 END AS ui_status
              FROM rekruitmen2.t_recruitment_sla sla
@@ -299,10 +361,7 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Data SLA tidak ditemukan' });
         }
 
-        res.json({
-            success: true,
-            data: slaRows[0]
-        });
+        res.json({ success: true, data: slaRows[0] });
 
     } catch (error) {
         console.error('❌ SLA DASHBOARD ERROR:', error.message);
@@ -312,22 +371,23 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
 
 /**
  * GET /api/monitoring/kpi-hrd
- * KPI Dashboard khusus HRD
+ * =====================================================================
+ * DIPERBARUI: period sekarang support semua format —
+ *   'Today', 'Yesterday', 'This week', 'Last week',
+ *   'This month'/'month', 'Last month',
+ *   'This year'/'year', 'Last year',
+ *   'quarter',
+ *   'Custom: yyyy-MM-dd - yyyy-MM-dd',
+ *   'yyyy-MM-dd,yyyy-MM-dd'
+ * =====================================================================
  */
 router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
     const { period } = req.query;
 
     try {
-        let dateFilter = '';
-        if (period === 'month') {
-            dateFilter = 'AND YEAR(sla.sla_completed_at) = YEAR(CURDATE()) AND MONTH(sla.sla_completed_at) = MONTH(CURDATE())';
-        } else if (period === 'quarter') {
-            dateFilter = 'AND YEAR(sla.sla_completed_at) = YEAR(CURDATE()) AND QUARTER(sla.sla_completed_at) = QUARTER(CURDATE())';
-        } else if (period === 'year') {
-            dateFilter = 'AND YEAR(sla.sla_completed_at) = YEAR(CURDATE())';
-        }
+        const dateFilter = buildKpiDateFilter(period, 'sla.sla_completed_at');
+        const dateCondition = dateFilter.sql ? `AND ${dateFilter.sql}` : '';
 
-        // ✅ SQL KITA SEDERHANAKAN, HAPUS DATEDIFF
         const [rows] = await db.execute(`
             SELECT 
                 sla.sla_tpk_nomor,
@@ -338,7 +398,7 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
                 k.kar_nama as requester_name,
                 
                 sla.sla_min_days as standard_lead_time,
-                sla.sla_max_days, /* Tambahan wajib untuk JS */
+                sla.sla_max_days,
                 sla.sla_calculated_at as start_date,
                 sla.sla_completed_at as completion_date,
                 sla.sla_no_show_buffer_days as no_show_buffer_days,
@@ -352,15 +412,15 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
             WHERE sla.sla_status = 'COMPLETED'
-            ${dateFilter}
+            ${dateCondition}
             ORDER BY sla.sla_completed_at DESC
-        `);
+        `, dateFilter.params);
 
-        // ✅ HITUNG MENGGUNAKAN HARI KERJA (NODE.JS)
+        // Hitung menggunakan hari kerja (Node.js)
         const processedRows = rows.map(row => {
             const grossDays = countWorkdays(row.start_date, row.completion_date);
-            const netDays = Math.max(0, grossDays - row.no_show_buffer_days);
-            
+            const netDays   = Math.max(0, grossDays - row.no_show_buffer_days);
+
             let kpiStatus = 'DELAY';
             if (netDays <= row.standard_lead_time) {
                 kpiStatus = 'EXCELLENT';
@@ -373,38 +433,46 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
             return {
                 ...row,
                 gross_duration_days: grossDays,
-                net_duration_days: netDays,
-                performance_label: kpiStatus
+                net_duration_days:   netDays,
+                performance_label:   kpiStatus
             };
         });
 
-        const totalRecords = processedRows.length;
-        const avgGross = totalRecords > 0 ? processedRows.reduce((s, r) => s + r.gross_duration_days, 0) / totalRecords : 0;
-        const avgNet = totalRecords > 0 ? processedRows.reduce((s, r) => s + r.net_duration_days, 0) / totalRecords : 0;
-        const totalBuffer = processedRows.reduce((s, r) => s + r.no_show_buffer_days, 0);
+        const totalRecords   = processedRows.length;
+        const avgGross       = totalRecords > 0 ? processedRows.reduce((s, r) => s + r.gross_duration_days, 0) / totalRecords : 0;
+        const avgNet         = totalRecords > 0 ? processedRows.reduce((s, r) => s + r.net_duration_days, 0) / totalRecords : 0;
+        const totalBuffer    = processedRows.reduce((s, r) => s + r.no_show_buffer_days, 0);
 
         const excellentCount  = processedRows.filter(r => r.performance_label === 'EXCELLENT').length;
         const goodCount       = processedRows.filter(r => r.performance_label === 'GOOD').length;
         const acceptableCount = processedRows.filter(r => r.performance_label === 'ACCEPTABLE').length;
         const delayCount      = processedRows.filter(r => r.performance_label === 'DELAY').length;
 
+        // Label periode yang mudah dibaca untuk response
+        const periodLabel = !period || period === 'All Time' ? 'all_time' : period;
+
         res.json({
             success: true,
-            data: processedRows, // Kembalikan array yang sudah diproses
+            data: processedRows,
             summary: {
-                period: period || 'all_time',
-                total_completed: totalRecords,
-                avg_gross_duration: Math.round(avgGross * 10) / 10,
-                avg_net_duration: Math.round(avgNet * 10) / 10,
-                total_buffer_granted: totalBuffer,
-                performance_distribution: { excellent: excellentCount, good: goodCount, acceptable: acceptableCount, delay: delayCount },
+                period:                periodLabel,
+                total_completed:       totalRecords,
+                avg_gross_duration:    Math.round(avgGross * 10) / 10,
+                avg_net_duration:      Math.round(avgNet * 10) / 10,
+                total_buffer_granted:  totalBuffer,
+                performance_distribution: {
+                    excellent:  excellentCount,
+                    good:       goodCount,
+                    acceptable: acceptableCount,
+                    delay:      delayCount
+                },
                 success_rate: totalRecords > 0
                     ? Math.round(((excellentCount + goodCount) / totalRecords) * 100)
                     : 0
             },
             insights: {
                 fairness_note: 'Net Duration = Gross Duration - No-Show Buffer',
-                explanation: 'Perhitungan menggunakan Hari Kerja (Workdays), mengabaikan hari libur.'
+                explanation:   'Perhitungan menggunakan Hari Kerja (Workdays), mengabaikan hari libur.'
             }
         });
 
@@ -416,21 +484,17 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
 
 /**
  * GET /api/monitoring/kpi-approver
- * KPI Dashboard untuk Atasan/Manager
+ * =====================================================================
+ * DIPERBARUI: period sekarang support semua format (sama dengan kpi-hrd)
+ * =====================================================================
  */
 router.get('/kpi-approver', authenticate, async (req, res) => {
     const { period } = req.query;
     const user = req.user;
 
     try {
-        let dateFilter = '';
-        if (period === 'month') {
-            dateFilter = 'AND YEAR(sla.sla_approved_at) = YEAR(CURDATE()) AND MONTH(sla.sla_approved_at) = MONTH(CURDATE())';
-        } else if (period === 'quarter') {
-            dateFilter = 'AND YEAR(sla.sla_approved_at) = YEAR(CURDATE()) AND QUARTER(sla.sla_approved_at) = QUARTER(CURDATE())';
-        } else if (period === 'year') {
-            dateFilter = 'AND YEAR(sla.sla_approved_at) = YEAR(CURDATE())';
-        }
+        const dateFilter    = buildKpiDateFilter(period, 'sla.sla_approved_at');
+        const dateCondition = dateFilter.sql ? `AND ${dateFilter.sql}` : '';
 
         // Non-HRD hanya lihat data di mana dia adalah approver
         const roleFilter = user.user_hrd !== 1
@@ -460,10 +524,10 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
             LEFT JOIN tkaryawan approver ON approver.kar_nik = peminta.kar_nik_atasan
             WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
               AND sla.sla_approved_at IS NOT NULL
-              ${dateFilter}
+              ${dateCondition}
               ${roleFilter}
             ORDER BY sla_approval_delay_days DESC
-        `);
+        `, dateFilter.params);
 
         const [approverStats] = await db.execute(`
             SELECT
@@ -480,45 +544,43 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
             LEFT JOIN tkaryawan approver ON approver.kar_nik = peminta.kar_nik_atasan
             WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
               AND sla.sla_approved_at IS NOT NULL
-              ${dateFilter}
+              ${dateCondition}
               ${roleFilter}
             GROUP BY approver.kar_nik, approver.kar_nama
             HAVING total_approvals > 0
             ORDER BY avg_delay_days ASC
-        `);
+        `, dateFilter.params);
 
-        const totalRecords = rows.length;
+        const totalRecords        = rows.length;
         const fastTrackCount      = rows.filter(r => r.approval_performance === 'FAST_TRACK').length;
         const standardReviewCount = rows.filter(r => r.approval_performance === 'STANDARD_REVIEW').length;
         const extendedReviewCount = rows.filter(r => r.approval_performance === 'EXTENDED_REVIEW').length;
-        const avgDelay = totalRecords > 0
+        const avgDelay            = totalRecords > 0
             ? rows.reduce((s, r) => s + r.sla_approval_delay_days, 0) / totalRecords
             : 0;
+
+        const periodLabel = !period || period === 'All Time' ? 'all_time' : period;
 
         res.json({
             success: true,
             data: rows,
             approver_stats: approverStats,
             summary: {
-                period: period || 'all_time',
-                total_approvals: totalRecords,
+                period:                  periodLabel,
+                total_approvals:         totalRecords,
                 avg_approval_delay_days: Math.round(avgDelay * 10) / 10,
-                
-                // ✅ UBAH BAGIAN INI SESUAI DENGAN FIELD BARU
-                performance_distribution: { 
-                    fast_track_count: fastTrackCount, 
-                    standard_review_count: standardReviewCount, 
-                    extended_review_count: extendedReviewCount 
+                performance_distribution: {
+                    fast_track_count:      fastTrackCount,
+                    standard_review_count: standardReviewCount,
+                    extended_review_count: extendedReviewCount
                 },
-                
-                // ✅ UBAH JUGA RUMUS RATE-NYA (Gabungan Fast Track + Standard)
                 fast_approval_rate: totalRecords > 0
                     ? Math.round(((fastTrackCount + standardReviewCount) / totalRecords) * 100)
                     : 0
             },
             insights: {
-                note: 'KPI ini mengukur kecepatan atasan dalam approve permintaan karyawan',
-                target: 'Target ideal: approval dalam ≤3 hari kerja',
+                note:             'KPI ini mengukur kecepatan atasan dalam approve permintaan karyawan',
+                target:           'Target ideal: approval dalam ≤3 hari kerja',
                 fastest_approver: approverStats.length > 0 ? approverStats[0].approver_name : 'N/A',
                 slowest_approver: approverStats.length > 0 ? approverStats[approverStats.length - 1].approver_name : 'N/A'
             }
@@ -532,15 +594,14 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
 
 /**
  * GET /api/monitoring/dashboard-summary
- * Summary dashboard untuk semua role
  */
 router.get('/dashboard-summary', authenticate, async (req, res) => {
     const { user_kode, user_hrd } = req.user;
 
     try {
         const whereClause = user_hrd === 1 ? '' : 'WHERE (p.tpk_peminta = ? OR k.kar_nik_atasan = ?)';
-        const params = user_hrd === 1 ? [] : [user_kode, user_kode];
-        const andOrWhere = whereClause ? 'AND' : 'WHERE';
+        const params      = user_hrd === 1 ? [] : [user_kode, user_kode];
+        const andOrWhere  = whereClause ? 'AND' : 'WHERE';
 
         const [activeRequests] = await db.execute(
             `SELECT COUNT(*) as count
@@ -557,7 +618,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
              LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
              JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              ${whereClause} ${andOrWhere} sla.sla_status = 'CALCULATED'
-             AND CURDATE() > sla.sla_max_target_date`, 
+             AND CURDATE() > sla.sla_max_target_date`,
             params
         );
 
@@ -586,13 +647,13 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
         res.json({
             success: true,
             data: {
-                activeRequests: activeRequests[0].count,
-                overdueRequests: overdueRequests[0].count,
-                needUserUpdate: needUpdate[0].count,
+                activeRequests:     activeRequests[0].count,
+                overdueRequests:    overdueRequests[0].count,
+                needUserUpdate:     needUpdate[0].count,
                 completedThisMonth: completedThisMonth[0].count
             },
             period: {
-                year: new Date().getFullYear(),
+                year:  new Date().getFullYear(),
                 month: new Date().getMonth() + 1
             }
         });
@@ -605,7 +666,6 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
 
 // =====================================================================
 // ROUTER 4: GET /api/monitoring/check-deadline
-// PERUBAHAN: days_remaining & filter BETWEEN → pakai sla_max_target_date
 // =====================================================================
 router.get('/check-deadline', authenticate, isHRD, async (req, res) => {
     try {
@@ -618,22 +678,22 @@ router.get('/check-deadline', authenticate, isHRD, async (req, res) => {
                 k.kar_nama AS nama_peminta,
                 sla.sla_final_target_date,
                 sla.sla_max_target_date,
-                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining /* [UBAH] Gunakan max_target_date */
+                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining
             FROM rekruitmen2.t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
             WHERE sla.sla_status = 'CALCULATED'
               AND sla.sla_is_editable = 0
-              AND DATEDIFF(sla.sla_max_target_date, CURDATE()) BETWEEN 0 AND 3 /* [UBAH] Gunakan max_target_date */
+              AND DATEDIFF(sla.sla_max_target_date, CURDATE()) BETWEEN 0 AND 3
             ORDER BY days_remaining ASC
         `);
 
         res.json({
-            success: true,
+            success:       true,
             alerted_count: rows.length,
             threshold_days: 3,
-            data: rows
+            data:          rows
         });
 
     } catch (error) {
