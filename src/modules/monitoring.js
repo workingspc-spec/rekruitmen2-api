@@ -120,6 +120,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 sla.sla_approval_delay_days,
                 sla.sla_status,
                 sla.sla_hired_count,
+                sla.sla_completed_at,
                 
                 approver.kar_nama AS approver_name,
                 
