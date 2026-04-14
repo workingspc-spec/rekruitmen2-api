@@ -5,106 +5,97 @@ const router = express.Router();
 /**
  * =====================================================================
  * MODULE: MASTER DATA
- * Migrasi dari: uListJabatan.pas, uListBagian.pas, uCariJabatan.pas
  * =====================================================================
  */
 
-// ---------------------------------------------------------------------
-// 1. GET LIST JABATAN (Pengganti uListJabatan.pas)
-// ---------------------------------------------------------------------
+// GET /api/master/jabatan
 router.get('/jabatan', async (req, res) => {
     try {
         const { search } = req.query;
-        
         let query = 'SELECT jab_kode, jab_nama FROM rekruitmen.tjabatan';
-        let params = [];
-
-        // Logic sesuai Delphi:
-        // - FormShow: tanpa WHERE
-        // - Button1Click: dengan WHERE jab_nama LIKE
+        const params = [];
         if (search) {
             query += ' WHERE jab_nama LIKE ?';
             params.push(`%${search}%`);
         }
-
         const [rows] = await db.execute(query, params);
-
-        res.json({
-            success: true,
-            data: rows  // [{jab_kode: '...', jab_nama: '...'}, ...]
-        });
-
+        res.json({ success: true, data: rows });
     } catch (error) {
         console.error('Error Get Jabatan:', error);
-        res.status(500).json({ 
-            success: false,
-            message: 'Gagal mengambil data jabatan', 
-            error: error.message 
-        });
+        res.status(500).json({ success: false, message: 'Gagal mengambil data jabatan', error: error.message });
     }
 });
 
-// ---------------------------------------------------------------------
-// 2. GET LIST BAGIAN (Pengganti uListBagian.pas)
-// ---------------------------------------------------------------------
+// GET /api/master/bagian
 router.get('/bagian', async (req, res) => {
     try {
         const { search } = req.query;
-
         let query = 'SELECT DISTINCT kar_bagian FROM rekruitmen.tkaryawan';
-        let params = [];
-
-        // Logic sesuai Delphi:
-        // - FormShow: SELECT distinct kar_bagian (tanpa WHERE)
-        // - Button1Click: WHERE kar_bagian LIKE
+        const params = [];
         if (search) {
             query += ' WHERE kar_bagian LIKE ?';
             params.push(`%${search}%`);
         }
-
         const [rows] = await db.execute(query, params);
-
-        res.json({
-            success: true,
-            data: rows  // [{kar_bagian: '...'}, ...]
-        });
-
+        res.json({ success: true, data: rows });
     } catch (error) {
         console.error('Error Get Bagian:', error);
-        res.status(500).json({ 
-            success: false,
-            message: 'Gagal mengambil data bagian',
-            error: error.message 
-        });
+        res.status(500).json({ success: false, message: 'Gagal mengambil data bagian', error: error.message });
     }
 });
 
-// ---------------------------------------------------------------------
-// 3. GET CARI JABATAN (Pengganti uCariJabatan.pas)
-// ---------------------------------------------------------------------
-// Note: Query asli di uCariJabatan.pas ada typo (jaba_nama),
-// tapi kita ikuti yang benar: jab_nama
+// GET /api/master/cari-jabatan
 router.get('/cari-jabatan', async (req, res) => {
     try {
-        // Query sesuai FirstShow procedure di uCariJabatan.pas
-        // Original: SELECT jab_kode,jaba_nama from tjabatan (ada typo)
-        // Yang benar: SELECT jab_kode,jab_nama from tjabatan
-        const query = 'SELECT jab_kode, jab_nama FROM rekruitmen.tjabatan';
-        
-        const [rows] = await db.execute(query);
+        const [rows] = await db.execute('SELECT jab_kode, jab_nama FROM rekruitmen.tjabatan');
+        res.json({ success: true, data: rows });
+    } catch (error) {
+        console.error('Error Cari Jabatan:', error);
+        res.status(500).json({ success: false, message: 'Gagal mengambil data jabatan', error: error.message });
+    }
+});
+
+/**
+ * GET /api/master/holidays
+ * Mengembalikan daftar tanggal libur dari tharilibur.
+ * Query param:
+ *   - year (opsional): tahun spesifik, mis. ?year=2026
+ *   - Jika tidak ada, kembalikan tahun ini + tahun depan (cukup untuk validasi form)
+ *
+ * hl_status = 1  → hari libur umum (termasuk Minggu)
+ * Endpoint ini tidak butuh auth karena hanya data kalender publik.
+ */
+router.get('/holidays', async (req, res) => {
+    try {
+        const requestedYear = parseInt(req.query.year) || null;
+        const currentYear = new Date().getFullYear();
+
+        let yearFrom, yearTo;
+        if (requestedYear) {
+            yearFrom = requestedYear;
+            yearTo   = requestedYear;
+        } else {
+            yearFrom = currentYear;
+            yearTo   = currentYear + 1;
+        }
+
+        const [rows] = await db.execute(
+            `SELECT DATE_FORMAT(hl_tanggal, '%Y-%m-%d') AS date
+             FROM hrd2.tharilibur
+             WHERE hl_status = 1
+               AND YEAR(hl_tanggal) BETWEEN ? AND ?
+             ORDER BY hl_tanggal ASC`,
+            [yearFrom, yearTo]
+        );
 
         res.json({
             success: true,
-            data: rows
+            data: rows.map(r => r.date),
+            meta: { yearFrom, yearTo, count: rows.length }
         });
-
     } catch (error) {
-        console.error('Error Cari Jabatan:', error);
-        res.status(500).json({ 
-            success: false,
-            message: 'Gagal mengambil data jabatan',
-            error: error.message 
-        });
+        console.error('Error Get Holidays:', error);
+        res.status(500).json({ success: false, message: 'Gagal mengambil data libur', error: error.message });
     }
 });
 
