@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'backend-pkar',
+      name: 'rekruitmen2-api',
       script: 'app.js',
 
       exec_mode: 'fork',
