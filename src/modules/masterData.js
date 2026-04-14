@@ -12,7 +12,7 @@ const router = express.Router();
 router.get('/jabatan', async (req, res) => {
     try {
         const { search } = req.query;
-        let query = 'SELECT jab_kode, jab_nama FROM rekruitmen.tjabatan';
+        let query = 'SELECT jab_kode, jab_nama FROM hrd2.tjabatan';
         const params = [];
         if (search) {
             query += ' WHERE jab_nama LIKE ?';
@@ -30,7 +30,7 @@ router.get('/jabatan', async (req, res) => {
 router.get('/bagian', async (req, res) => {
     try {
         const { search } = req.query;
-        let query = 'SELECT DISTINCT kar_bagian FROM rekruitmen.tkaryawan';
+        let query = 'SELECT DISTINCT kar_bagian FROM hrd2.tkaryawan';
         const params = [];
         if (search) {
             query += ' WHERE kar_bagian LIKE ?';
@@ -47,7 +47,7 @@ router.get('/bagian', async (req, res) => {
 // GET /api/master/cari-jabatan
 router.get('/cari-jabatan', async (req, res) => {
     try {
-        const [rows] = await db.execute('SELECT jab_kode, jab_nama FROM rekruitmen.tjabatan');
+        const [rows] = await db.execute('SELECT jab_kode, jab_nama FROM hrd2.tjabatan');
         res.json({ success: true, data: rows });
     } catch (error) {
         console.error('Error Cari Jabatan:', error);
