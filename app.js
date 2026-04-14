@@ -27,6 +27,9 @@ const { refreshHolidaysFromDB } = require('./src/utils/workdayCalculator');
 // ================= INIT APP =================
 const app = express();
 
+// Beri tahu Express untuk mempercayai 1 lapis proxy (yaitu Nginx)
+app.set('trust proxy', 1);
+
 // ================= MIDDLEWARE =================
 app.use((req, res, next) => {
     req.dbTimezone = '+07:00';
