@@ -3,10 +3,15 @@
  * UTILITY: Workday Calculator
  * Menghitung hari kerja (skip Minggu & libur dari tabel hrd2.tharilibur)
  * HRD bekerja Senin-Sabtu (hanya Minggu = weekend)
+ *
+ * [FIX-INFO] Circular Dependency diperbaiki:
+ *   Sebelumnya: require('../config/db') dilakukan secara lazy di dalam fungsi
+ *   Sekarang: db di-inject sebagai parameter dari luar (app.js)
+ *   Referensi disimpan di _dbRef untuk digunakan oleh setInterval.
  * =====================================================================
  */
 
-// ── Fallback hardcoded (dipakai jika DB belum dimuat / gagal) ────────────────
+// ── Fallback hardcoded (dipakai jika DB belum dimuat / gagal) ─────────────────
 const FALLBACK_HOLIDAYS = new Set([
     // 2025
     '2025-01-01','2025-01-27','2025-01-29',
@@ -27,9 +32,13 @@ const FALLBACK_HOLIDAYS = new Set([
     '2026-12-25',
 ]);
 
-// ── Cache dari DB ────────────────────────────────────────────────────────────
-let _holidaySet = null;  // null = belum dimuat
+// ── Cache dari DB ──────────────────────────────────────────────────────────────
+let _holidaySet = null;   // null = belum dimuat
 let _lastLoaded = null;
+
+// [FIX-INFO] Referensi DB disimpan setelah pertama kali di-inject dari app.js
+// Digunakan oleh setInterval untuk refresh berkala tanpa memerlukan require() ulang
+let _dbRef = null;
 
 /**
  * Format Date ke string 'YYYY-MM-DD' tanpa UTC shift
@@ -51,15 +60,29 @@ function getHolidaySet() {
 
 /**
  * Muat hari libur dari hrd2.tharilibur.
- * Dipanggil sekali saat startup (dari app.js) dan bisa di-refresh manual.
- * Muat tahun saat ini, tahun lalu, dan tahun depan agar selalu relevan.
+ *
+ * [FIX-INFO] db di-inject sebagai parameter untuk menghindari circular dependency.
+ * Jika db tidak disuplai, gunakan _dbRef yang sudah tersimpan sebelumnya.
+ *
+ * @param {Object|null} db - Instance pool mysql2 (dari app.js atau slaCron.js)
  */
-async function refreshHolidaysFromDB() {
+async function refreshHolidaysFromDB(db = null) {
+    // Simpan referensi jika disuplai (untuk digunakan oleh interval)
+    if (db) {
+        _dbRef = db;
+    }
+
+    const dbToUse = _dbRef;
+
+    if (!dbToUse) {
+        console.warn('[workday] DB instance not provided and no stored reference. Using fallback.');
+        return;
+    }
+
     try {
-        const db = require('../config/db');
         const currentYear = new Date().getFullYear();
 
-        const [rows] = await db.execute(
+        const [rows] = await dbToUse.execute(
             `SELECT DATE_FORMAT(hl_tanggal, '%Y-%m-%d') AS d
              FROM hrd2.tharilibur
              WHERE hl_status = 1
@@ -119,7 +142,6 @@ function addWorkdays(startDate, workdays) {
 
 /**
  * Hitung selisih hari kerja antara dua tanggal (eksklusif startDate).
- * Contoh: 12 Feb → 12 Feb = 0; 12 Feb → 13 Feb (hari kerja) = 1
  * @param {Date|string} startDate
  * @param {Date|string} endDate
  * @returns {number}
@@ -134,7 +156,7 @@ function countWorkdays(startDate, endDate) {
 
     let count = 0;
     const cur = new Date(start);
-    cur.setDate(cur.getDate() + 1); // mulai dari hari SETELAH start
+    cur.setDate(cur.getDate() + 1);
 
     while (cur <= end) {
         if (isWorkday(cur)) count++;
@@ -151,10 +173,12 @@ function formatDateSafe(date) {
     return toDateStr(new Date(date));
 }
 
-// ── Refresh otomatis setiap 6 jam (agar data libur baru langsung berlaku) ────
-// Ini berjalan di background setelah modul ini di-require pertama kali
+// ── Refresh otomatis setiap 6 jam ─────────────────────────────────────────────
+// [FIX-INFO] Tidak ada lagi require() di dalam interval — gunakan _dbRef yang sudah tersimpan
 setInterval(() => {
-    refreshHolidaysFromDB().catch(() => {}); // silent fail
+    if (_dbRef) {
+        refreshHolidaysFromDB().catch(() => {}); // silent fail
+    }
 }, 6 * 60 * 60 * 1000);
 
 module.exports = {
@@ -165,7 +189,6 @@ module.exports = {
     isWorkday,
     formatDateSafe,
     refreshHolidaysFromDB,
-    // Ekspor untuk keperluan test / debug
     getHolidaySet,
     FALLBACK_HOLIDAYS: Array.from(FALLBACK_HOLIDAYS),
 };

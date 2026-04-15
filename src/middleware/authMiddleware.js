@@ -4,6 +4,12 @@ const jwt = require('jsonwebtoken');
 /**
  * =====================================================================
  * MIDDLEWARE: JWT AUTHENTICATION & AUTHORIZATION
+ *
+ * [FIX-KRITIS] Mendukung dua metode autentikasi:
+ *   1. httpOnly Cookie (web browser) — token tidak bisa diakses JS
+ *   2. Bearer Token via Authorization header (Android/API client)
+ *
+ * Urutan pemeriksaan: Bearer Token → Cookie
  * =====================================================================
  */
 
@@ -13,25 +19,24 @@ const jwt = require('jsonwebtoken');
  */
 const authenticate = (req, res, next) => {
     try {
-        // Ambil token dari header Authorization
+        let token = null;
+
+        // 1. Coba ambil dari Authorization header (untuk Android/API client)
         const authHeader = req.headers.authorization;
-        
-        if (!authHeader) {
-            return res.status(401).json({
-                success: false,
-                message: 'Token tidak ditemukan. Silakan login terlebih dahulu.'
-            });
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.substring(7);
         }
 
-        // Format: "Bearer <token>"
-        const token = authHeader.startsWith('Bearer ') 
-            ? authHeader.substring(7) 
-            : authHeader;
+        // 2. Fallback ke httpOnly cookie (untuk web browser)
+        //    Cookie di-set oleh server saat login, tidak bisa diakses JS
+        if (!token && req.cookies && req.cookies.token) {
+            token = req.cookies.token;
+        }
 
         if (!token) {
             return res.status(401).json({
                 success: false,
-                message: 'Format token tidak valid'
+                message: 'Token tidak ditemukan. Silakan login terlebih dahulu.'
             });
         }
 
@@ -42,13 +47,15 @@ const authenticate = (req, res, next) => {
         req.user = {
             user_kode: decoded.user_kode,
             user_nama: decoded.user_nama,
-            user_hrd: decoded.user_hrd
+            user_hrd:  decoded.user_hrd
         };
 
         next();
 
     } catch (error) {
         if (error.name === 'TokenExpiredError') {
+            // Hapus cookie yang sudah expired (jika ada)
+            res.clearCookie('token', { httpOnly: true, path: '/' });
             return res.status(401).json({
                 success: false,
                 message: 'Token sudah kadaluarsa. Silakan login kembali.'
@@ -102,7 +109,6 @@ const isManager = (req, res, next) => {
         });
     }
 
-    // Manager adalah user yang bukan HRD
     if (req.user.user_hrd === 1) {
         return res.status(403).json({
             success: false,
@@ -115,27 +121,30 @@ const isManager = (req, res, next) => {
 
 /**
  * Optional middleware: bisa login atau tidak
- * Jika ada token, decode. Jika tidak, lanjut tanpa req.user
+ * Jika ada token (Bearer atau Cookie), decode. Jika tidak, lanjut tanpa req.user
  */
 const optionalAuth = (req, res, next) => {
     try {
-        const authHeader = req.headers.authorization;
-        
-        if (authHeader) {
-            const token = authHeader.startsWith('Bearer ') 
-                ? authHeader.substring(7) 
-                : authHeader;
+        let token = null;
 
-            if (token) {
-                const decoded = jwt.verify(token, process.env.JWT_SECRET);
-                req.user = {
-                    user_kode: decoded.user_kode,
-                    user_nama: decoded.user_nama,
-                    user_hrd: decoded.user_hrd
-                };
-            }
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.substring(7);
         }
-        
+
+        if (!token && req.cookies && req.cookies.token) {
+            token = req.cookies.token;
+        }
+
+        if (token) {
+            const decoded = jwt.verify(token, process.env.JWT_SECRET);
+            req.user = {
+                user_kode: decoded.user_kode,
+                user_nama: decoded.user_nama,
+                user_hrd:  decoded.user_hrd
+            };
+        }
+
         next();
 
     } catch (error) {

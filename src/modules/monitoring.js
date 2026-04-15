@@ -1,9 +1,9 @@
 // src/modules/monitoring.js
 const express = require('express');
-const db = require('../config/db');
+const db      = require('../config/db');
 const { authenticate, isHRD } = require('../middleware/authMiddleware');
-const { countWorkdays } = require('../utils/workdayCalculator');
-const router = express.Router();
+const { countWorkdays }       = require('../utils/workdayCalculator');
+const router  = express.Router();
 
 /**
  * =====================================================================
@@ -63,7 +63,6 @@ function buildKpiDateFilter(period, dateColumn) {
             if (rangeStr.toLowerCase().startsWith('custom:')) {
                 rangeStr = rangeStr.replace(/custom:/i, '').trim();
             }
-            // Normalise separator: bisa ' - ' atau ','
             const parts = rangeStr.includes(',')
                 ? rangeStr.split(',')
                 : rangeStr.split(' - ');
@@ -95,20 +94,20 @@ router.get('/sla-status', authenticate, async (req, res) => {
             whereClause = 'WHERE sla.sla_status IN ("CALCULATED", "COMPLETED")';
             params = [];
         } else {
-            whereClause = `WHERE (p.tpk_peminta = ? OR k.kar_nik_atasan = ?) 
+            whereClause = `WHERE (p.tpk_peminta = ? OR k.kar_nik_atasan = ?)
                            AND sla.sla_status IN ("CALCULATED", "COMPLETED")`;
             params = [user_kode, user_kode];
         }
 
         const sql = `
-            SELECT 
+            SELECT
                 p.tpk_nomor,
                 p.tpk_tanggal,
                 j.jab_nama,
                 p.tpk_bagian,
                 p.tpk_peminta,
                 k.kar_nama as nama_peminta,
-                
+
                 sla.sla_calculated_at,
                 sla.sla_final_target_date,
                 sla.sla_max_target_date,
@@ -121,15 +120,15 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 sla.sla_status,
                 sla.sla_hired_count,
                 sla.sla_completed_at,
-                
+
                 approver.kar_nama AS approver_name,
-                
+
                 DATEDIFF(sla.sla_max_target_date, CURDATE()) as days_remaining,
                 p.tpk_jumlah as target_count,
-                
+
                 ROUND((COALESCE(sla.sla_hired_count, 0) / NULLIF(p.tpk_jumlah, 0)) * 100) AS progress_percentage,
 
-                CASE 
+                CASE
                     WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
                     WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'
@@ -137,22 +136,22 @@ router.get('/sla-status', authenticate, async (req, res) => {
                     WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'
                     ELSE 'ON_PROGRESS'
                 END as ui_status_tag,
-                
+
                 CASE
                     WHEN sla.sla_approval_delay_days > 5 THEN 'APPROVAL_DELAYED'
                     ELSE NULL
                 END AS approval_flag,
-                
+
                 CASE WHEN k.kar_nik_atasan = ? THEN 1 ELSE 0 END as is_bawahan
-                
+
             FROM tpermintaankaryawan p
             JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
             LEFT JOIN tkaryawan approver ON approver.kar_nik = k.kar_nik_atasan
             ${whereClause}
-            ORDER BY 
-                CASE 
+            ORDER BY
+                CASE
                     WHEN sla.sla_is_editable = 1 THEN 0
                     WHEN CURDATE() > sla.sla_max_target_date THEN 1
                     ELSE 2
@@ -175,8 +174,8 @@ router.get('/sla-status', authenticate, async (req, res) => {
         };
 
         if (user_hrd !== 1) {
-            summary.monitoring_bawahan  = rows.filter(r => r.is_bawahan === 1).length;
-            summary.permintaan_sendiri  = rows.filter(r => r.is_bawahan === 0).length;
+            summary.monitoring_bawahan = rows.filter(r => r.is_bawahan === 1).length;
+            summary.permintaan_sendiri = rows.filter(r => r.is_bawahan === 0).length;
         }
 
         res.json({
@@ -229,7 +228,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
         }
 
         const [slaRows] = await db.execute(
-            `SELECT 
+            `SELECT
                 sla.*,
                 j.jab_nama,
                 p.tpk_jumlah,
@@ -258,7 +257,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
         const sla = slaRows[0];
 
         const [editHistory] = await db.execute(
-            `SELECT 
+            `SELECT
                 l.log_id,
                 l.field_name,
                 l.old_value,
@@ -332,7 +331,7 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
         }
 
         const [slaRows] = await db.execute(
-            `SELECT 
+            `SELECT
                 sla.sla_tpk_nomor,
                 sla.sla_final_target_date,
                 sla.sla_max_target_date,
@@ -372,15 +371,6 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
 
 /**
  * GET /api/monitoring/kpi-hrd
- * =====================================================================
- * DIPERBARUI: period sekarang support semua format —
- *   'Today', 'Yesterday', 'This week', 'Last week',
- *   'This month'/'month', 'Last month',
- *   'This year'/'year', 'Last year',
- *   'quarter',
- *   'Custom: yyyy-MM-dd - yyyy-MM-dd',
- *   'yyyy-MM-dd,yyyy-MM-dd'
- * =====================================================================
  */
 router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
     const { period } = req.query;
@@ -390,24 +380,24 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
         const dateCondition = dateFilter.sql ? `AND ${dateFilter.sql}` : '';
 
         const [rows] = await db.execute(`
-            SELECT 
+            SELECT
                 sla.sla_tpk_nomor,
                 p.tpk_tanggal as request_date,
                 j.jab_nama as position,
                 p.tpk_bagian as department,
                 p.tpk_peminta,
                 k.kar_nama as requester_name,
-                
+
                 sla.sla_min_days as standard_lead_time,
                 sla.sla_max_days,
                 sla.sla_calculated_at as start_date,
                 sla.sla_completed_at as completion_date,
                 sla.sla_no_show_buffer_days as no_show_buffer_days,
-                
+
                 sla.sla_hired_count as hired_count,
                 p.tpk_jumlah as target_count,
                 sla.sla_source
-                
+
             FROM rekruitmen2.t_recruitment_sla sla
             JOIN tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN tjabatan j ON j.jab_kode = sla.sla_job_code
@@ -417,7 +407,6 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
             ORDER BY sla.sla_completed_at DESC
         `, dateFilter.params);
 
-        // Hitung menggunakan hari kerja (Node.js)
         const processedRows = rows.map(row => {
             const grossDays = countWorkdays(row.start_date, row.completion_date);
             const netDays   = Math.max(0, grossDays - row.no_show_buffer_days);
@@ -449,7 +438,6 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
         const acceptableCount = processedRows.filter(r => r.performance_label === 'ACCEPTABLE').length;
         const delayCount      = processedRows.filter(r => r.performance_label === 'DELAY').length;
 
-        // Label periode yang mudah dibaca untuk response
         const periodLabel = !period || period === 'All Time' ? 'all_time' : period;
 
         res.json({
@@ -485,9 +473,12 @@ router.get('/kpi-hrd', authenticate, isHRD, async (req, res) => {
 
 /**
  * GET /api/monitoring/kpi-approver
- * =====================================================================
- * DIPERBARUI: period sekarang support semua format (sama dengan kpi-hrd)
- * =====================================================================
+ *
+ * [FIX-KRITIS] SQL Injection diperbaiki:
+ *   roleFilter sebelumnya menggunakan string interpolation langsung:
+ *     `AND approver.kar_nik = '${user.user_kode}'`   ← RENTAN INJEKSI
+ *   Sekarang menggunakan parameterized query:
+ *     `AND approver.kar_nik = ?`  + roleParams array  ← AMAN
  */
 router.get('/kpi-approver', authenticate, async (req, res) => {
     const { period } = req.query;
@@ -497,10 +488,15 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
         const dateFilter    = buildKpiDateFilter(period, 'sla.sla_approved_at');
         const dateCondition = dateFilter.sql ? `AND ${dateFilter.sql}` : '';
 
-        // Non-HRD hanya lihat data di mana dia adalah approver
-        const roleFilter = user.user_hrd !== 1
-            ? `AND approver.kar_nik = '${user.user_kode}'`
-            : '';
+        // [FIX-KRITIS] Gunakan parameterized query, BUKAN string interpolation
+        // Sebelumnya: `AND approver.kar_nik = '${user.user_kode}'` — VULNERABLE
+        // Sekarang: placeholder ? dengan value di-pass ke params array — SAFE
+        const roleFilter = user.user_hrd !== 1 ? `AND approver.kar_nik = ?` : '';
+        const roleParams = user.user_hrd !== 1 ? [user.user_kode] : [];
+
+        // Gabungkan params: [dateFilter.params..., roleParams...]
+        const queryParams        = [...dateFilter.params, ...roleParams];
+        const statsQueryParams   = [...dateFilter.params, ...roleParams];
 
         const [rows] = await db.execute(`
             SELECT
@@ -528,7 +524,7 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
               ${dateCondition}
               ${roleFilter}
             ORDER BY sla_approval_delay_days DESC
-        `, dateFilter.params);
+        `, queryParams);
 
         const [approverStats] = await db.execute(`
             SELECT
@@ -550,7 +546,7 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
             GROUP BY approver.kar_nik, approver.kar_nama
             HAVING total_approvals > 0
             ORDER BY avg_delay_days ASC
-        `, dateFilter.params);
+        `, statsQueryParams);
 
         const totalRecords        = rows.length;
         const fastTrackCount      = rows.filter(r => r.approval_performance === 'FAST_TRACK').length;
@@ -671,7 +667,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
 router.get('/check-deadline', authenticate, isHRD, async (req, res) => {
     try {
         const [rows] = await db.execute(`
-            SELECT 
+            SELECT
                 sla.sla_tpk_nomor,
                 p.tpk_bagian,
                 j.jab_nama,
