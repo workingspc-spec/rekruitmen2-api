@@ -657,115 +657,13 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             [statusVal, tpk_nomor]
         );
 
-        // ========== APPROVE: Hitung SLA ==========
+        // ========== APPROVE: Catat persetujuan Atasan — SLA dihitung setelah HRD approve ==========
         if (statusVal === 1) {
-            const [masterData] = await connection.execute(
-                'SELECT jlt_min_days, jlt_max_days, jlt_is_flexible FROM rekruitmen2.job_lead_time_master WHERE jlt_job_code = ? AND jlt_active = 1',
-                [data.tpk_jab_kode]
-            );
-
-            // SESUDAH — tambahkan logika extraDays setelah master didapat
-            let master = { jlt_min_days: 14, jlt_max_days: 30, jlt_is_flexible: 0 };
-
-            if (masterData.length === 0) {
-                console.warn(`[WARNING] Master lead time untuk ${data.tpk_jab_kode} tidak ditemukan. Menggunakan fallback 14 hari.`);
-            } else {
-                master = masterData[0];
-            }
-
-            // ✅ BULK REQUEST BUFFER — Tambah hari ekstra jika permintaan > 1 orang
-            const jumlahDiminta = data.tpk_jumlah || 1;
-            let extraDays = 0;
-
-            if (jumlahDiminta > 1) {
-                if (jumlahDiminta <= 3) {
-                    extraDays = 3;                             // 2–3 orang: +3 hari
-                } else if (jumlahDiminta <= 5) {
-                    extraDays = 6;                             // 4–5 orang: +6 hari
-                } else {
-                    extraDays = 6 + (jumlahDiminta - 5);      // >5 orang: +6 + 1/orang
-                }
-            }
-
-            // Terapkan hanya untuk jabatan non-fleksibel
-            if (master.jlt_is_flexible !== 1 && extraDays > 0) {
-                master.jlt_min_days += extraDays;
-                master.jlt_max_days += extraDays;
-                console.log(`[BULK BUFFER] ${tpk_nomor} — ${jumlahDiminta} orang, extra +${extraDays} hari. Min: ${master.jlt_min_days}, Max: ${master.jlt_max_days}`);
-            }
-
-            const approvedAt = new Date();
-            approvedAt.setHours(0, 0, 0, 0);
-
-            const [y, m, d] = data.sla_original_requested_date.toString().split('T')[0].split('-').map(Number);
-            const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
-            const createdAt = new Date(data.sla_request_created_at);
-
-            let systemFloorDate = null;
-            let finalTargetDate = null;
-            let maxTargetDate   = null;
-            let slaSource       = null;
-
-            const approvalDelayDays = countWorkdays(createdAt, approvedAt);
-
-            if (master.jlt_is_flexible === 1) {
-                finalTargetDate = requestedDate;
-                maxTargetDate   = requestedDate;
-                slaSource = 'FLEXIBLE';
-            } else {
-                systemFloorDate = addWorkdays(approvedAt, master.jlt_min_days);
-                maxTargetDate   = addWorkdays(approvedAt, master.jlt_max_days);
-
-                if (systemFloorDate.getTime() > requestedDate.getTime()) {
-                    finalTargetDate = systemFloorDate;
-                    slaSource = 'SYSTEM';
-                } else {
-                    systemFloorDate = requestedDate; 
-                    finalTargetDate = requestedDate;
-                    slaSource = 'USER';
-                }
-            }
-
-            const diffDays      = countWorkdays(requestedDate, finalTargetDate);
-            // Cukup catat kejadiannya secara obyektif
-            const approvalNote = `Telah dievaluasi dan disetujui oleh atasan.`;
-
-            // ✅ Catatan transparansi untuk bulk request
-            const bulkNote = extraDays > 0
-                ? ` (Penambahan +${extraDays} hari untuk pencarian massal ${jumlahDiminta} orang).`
-                : '';
-
             await connection.execute(
                 `UPDATE rekruitmen2.t_recruitment_sla SET
-                    sla_approved_at               = NOW(),
-                    sla_calculated_at             = NOW(),
-                    sla_min_days                  = ?,
-                    sla_max_days                  = ?,
-                    sla_is_flexible               = ?,
-                    sla_system_floor_date         = ?,
-                    sla_final_target_date         = ?,
-                    sla_max_target_date           = ?,
-                    sla_original_requested_date   = ?,
-                    sla_source                    = ?,
-                    sla_approval_delay_days       = ?,
-                    sla_user_vs_system_diff_days  = ?,
-                    sla_notes                     = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] ', ?),
-                    sla_status                    = 'CALCULATED'
-                WHERE sla_tpk_nomor = ?`,
-                [
-                    master.jlt_min_days,
-                    master.jlt_max_days,
-                    master.jlt_is_flexible,
-                    formatDateSafe(systemFloorDate),
-                    formatDateSafe(finalTargetDate),
-                    formatDateSafe(maxTargetDate),
-                    formatDateSafe(requestedDate),
-                    slaSource,
-                    approvalDelayDays,
-                    diffDays,
-                    approvalNote + bulkNote,
-                    tpk_nomor
-                ]
+                    sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Disetujui Atasan. Menunggu persetujuan HRD.')
+                WHERE sla_tpk_nomor = ? AND sla_status = 'PENDING'`,
+                [tpk_nomor]
             );
 
             await connection.commit();
@@ -773,20 +671,8 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
             return res.json({
                 success: true,
-                message: 'Permintaan berhasil di-APPROVE',
-                data: {
-                    sla_info: {
-                        original_requested_date: formatDateSafe(requestedDate),
-                        system_floor_date: formatDateSafe(systemFloorDate),
-                        final_target_date: formatDateSafe(finalTargetDate),
-                        sla_source: slaSource,
-                        approval_delay_days: approvalDelayDays,
-                        explanation:
-                            slaSource === 'SYSTEM'   ? `Tanggal user tidak realistis. HRD butuh minimal ${master.jlt_min_days} hari kerja.`
-                          : slaSource === 'FLEXIBLE' ? 'Jabatan fleksibel. HRD akan bekerja sesuai kebutuhan.'
-                          :                            'Tanggal user sudah realistis. HRD akan bekerja sesuai target.'
-                    }
-                }
+                message: 'Permintaan berhasil di-APPROVE oleh Atasan. Menunggu persetujuan HRD.'
+                // Tidak ada sla_info — SLA belum dihitung hingga HRD approve
             });
 
         // ========== REJECT: Batalkan SLA ==========
@@ -862,13 +748,23 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
 
 /**
  * POST /api/recruitment/approval/hrd/action
- * HRD approve permintaan → Recruitment resmi dibuka
+ * HRD approve ATAU reject permintaan
+ * Body: { tpk_nomor, action: 'APPROVE' | 'REJECT', alasan_tolak? }
+ *
+ * ✅ PERUBAHAN UTAMA: Kalkulasi SLA dipindah dari atasan ke sini.
+ * "Argo tiket" baru berjalan setelah HRD approve, bukan setelah atasan approve.
  */
 router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
-    const { tpk_nomor } = req.body;
+    const { tpk_nomor, action, alasan_tolak } = req.body;
 
     if (!tpk_nomor) {
         return res.status(400).json({ success: false, message: 'Parameter tpk_nomor diperlukan' });
+    }
+    if (!action || !['APPROVE', 'REJECT'].includes(action)) {
+        return res.status(400).json({ success: false, message: 'Action harus APPROVE atau REJECT' });
+    }
+    if (action === 'REJECT' && (!alasan_tolak || !alasan_tolak.trim())) {
+        return res.status(400).json({ success: false, message: 'Alasan penolakan wajib diisi' });
     }
 
     const connection = await db.getConnection();
@@ -876,8 +772,22 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
     try {
         await connection.beginTransaction();
 
+        // Ambil data request + SLA (butuh jumlah untuk bulk buffer)
         const [checkRows] = await connection.execute(
-            'SELECT tpk_approveatasan, tpk_approveHRD FROM tpermintaankaryawan WHERE tpk_nomor = ? FOR UPDATE',
+            `SELECT
+                p.tpk_approveatasan,
+                p.tpk_approveHRD,
+                p.tpk_tanggal,
+                p.tpk_tgl_butuh,
+                p.tpk_jab_kode,
+                p.tpk_jumlah,
+                sla.sla_id,
+                sla.sla_original_requested_date,
+                sla.sla_request_created_at
+             FROM tpermintaankaryawan p
+             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+             WHERE p.tpk_nomor = ?
+             FOR UPDATE`,
             [tpk_nomor]
         );
 
@@ -904,25 +814,160 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Permintaan sudah pernah diproses oleh HRD' });
         }
 
+        // =====================================================================
+        // REJECT
+        // =====================================================================
+        if (action === 'REJECT') {
+            await connection.execute(
+                'UPDATE tpermintaankaryawan SET tpk_approveHRD = 2, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
+                [tpk_nomor]
+            );
+
+            await connection.execute(
+                `UPDATE rekruitmen2.t_recruitment_sla SET
+                    sla_status = 'CANCELLED',
+                    sla_notes  = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Ditolak HRD. Alasan: ', ?)
+                 WHERE sla_tpk_nomor = ?`,
+                [alasan_tolak.trim(), tpk_nomor]
+            );
+
+            await connection.commit();
+            connection.release();
+
+            return res.json({ success: true, message: 'Permintaan ditolak oleh HRD.' });
+        }
+
+        // =====================================================================
+        // APPROVE — Kalkulasi SLA (dipindah dari atasan ke sini)
+        // =====================================================================
         await connection.execute(
             'UPDATE tpermintaankaryawan SET tpk_approveHRD = 1, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
             [tpk_nomor]
         );
 
-        // ✅ PENTING: Catat waktu HRD approve di SLA sebagai penanda rekrutmen resmi dibuka
-        // Status tetap CALCULATED — akan jadi COMPLETED otomatis via trigger DB (sync_sla_hired_count)
-        // atau manual via endpoint /complete
+        // Ambil aturan lead time jabatan
+        const [masterData] = await connection.execute(
+            'SELECT jlt_min_days, jlt_max_days, jlt_is_flexible FROM rekruitmen2.job_lead_time_master WHERE jlt_job_code = ? AND jlt_active = 1',
+            [current.tpk_jab_kode]
+        );
+
+        let master = { jlt_min_days: 14, jlt_max_days: 30, jlt_is_flexible: 0 };
+        if (masterData.length === 0) {
+            console.warn(`[WARNING] Master lead time untuk ${current.tpk_jab_kode} tidak ditemukan. Menggunakan fallback 14 hari.`);
+        } else {
+            master = masterData[0];
+        }
+
+        // Bulk request buffer — identik dengan logika di atasan action sebelumnya
+        const jumlahDiminta = current.tpk_jumlah || 1;
+        let extraDays = 0;
+        if (jumlahDiminta > 1) {
+            if      (jumlahDiminta <= 3) extraDays = 3;
+            else if (jumlahDiminta <= 5) extraDays = 6;
+            else                         extraDays = 6 + (jumlahDiminta - 5);
+        }
+        if (master.jlt_is_flexible !== 1 && extraDays > 0) {
+            master.jlt_min_days += extraDays;
+            master.jlt_max_days += extraDays;
+            console.log(`[BULK BUFFER] ${tpk_nomor} — ${jumlahDiminta} orang, extra +${extraDays} hari. Min: ${master.jlt_min_days}, Max: ${master.jlt_max_days}`);
+        }
+
+        // "Argo mulai berjalan" saat HRD approve (bukan atasan)
+        const approvedAt = new Date();
+        approvedAt.setHours(0, 0, 0, 0);
+
+        const rawOriginal = current.sla_original_requested_date.toString().split('T')[0];
+        const [y, m, d]   = rawOriginal.split('-').map(Number);
+        const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
+        const createdAt     = new Date(current.sla_request_created_at);
+
+        let systemFloorDate = null;
+        let finalTargetDate = null;
+        let maxTargetDate   = null;
+        let slaSource       = null;
+
+        // Hitung approval delay: dari request dibuat → HRD approve
+        const approvalDelayDays = countWorkdays(createdAt, approvedAt);
+
+        if (master.jlt_is_flexible === 1) {
+            finalTargetDate = requestedDate;
+            maxTargetDate   = requestedDate;
+            slaSource = 'FLEXIBLE';
+        } else {
+            systemFloorDate = addWorkdays(approvedAt, master.jlt_min_days);
+            maxTargetDate   = addWorkdays(approvedAt, master.jlt_max_days);
+
+            if (systemFloorDate.getTime() > requestedDate.getTime()) {
+                finalTargetDate = systemFloorDate;
+                slaSource = 'SYSTEM';
+            } else {
+                systemFloorDate = requestedDate;
+                finalTargetDate = requestedDate;
+                slaSource = 'USER';
+            }
+        }
+
+        const diffDays   = countWorkdays(requestedDate, finalTargetDate);
+        const bulkNote   = extraDays > 0
+            ? ` (Penambahan +${extraDays} hari untuk pencarian massal ${jumlahDiminta} orang).`
+            : '';
+        const approvalNote = `Disetujui HRD — rekrutmen resmi dibuka.`;
+
         await connection.execute(
-            `UPDATE rekruitmen2.t_recruitment_sla
-             SET sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] HRD approve — rekrutmen dibuka.')
-             WHERE sla_tpk_nomor = ? AND sla_status = 'CALCULATED'`,
-            [tpk_nomor]
+            `UPDATE rekruitmen2.t_recruitment_sla SET
+                sla_approved_at               = NOW(),
+                sla_calculated_at             = NOW(),
+                sla_min_days                  = ?,
+                sla_max_days                  = ?,
+                sla_is_flexible               = ?,
+                sla_system_floor_date         = ?,
+                sla_final_target_date         = ?,
+                sla_max_target_date           = ?,
+                sla_original_requested_date   = ?,
+                sla_source                    = ?,
+                sla_approval_delay_days       = ?,
+                sla_user_vs_system_diff_days  = ?,
+                sla_notes                     = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] ', ?),
+                sla_status                    = 'CALCULATED'
+            WHERE sla_tpk_nomor = ?`,
+            [
+                master.jlt_min_days,
+                master.jlt_max_days,
+                master.jlt_is_flexible,
+                formatDateSafe(systemFloorDate),
+                formatDateSafe(finalTargetDate),
+                formatDateSafe(maxTargetDate),
+                formatDateSafe(requestedDate),
+                slaSource,
+                approvalDelayDays,
+                diffDays,
+                approvalNote + bulkNote,
+                tpk_nomor
+            ]
         );
 
         await connection.commit();
         connection.release();
 
-        res.json({ success: true, message: 'HRD berhasil Approve — Recruitment Dibuka' });
+        return res.json({
+            success: true,
+            message: 'HRD berhasil Approve — Rekrutmen Dibuka & SLA mulai dihitung.',
+            data: {
+                sla_info: {
+                    original_requested_date: formatDateSafe(requestedDate),
+                    system_floor_date:       formatDateSafe(systemFloorDate),
+                    final_target_date:       formatDateSafe(finalTargetDate),
+                    sla_source:              slaSource,
+                    approval_delay_days:     approvalDelayDays,
+                    explanation:
+                        slaSource === 'SYSTEM'
+                            ? `Tanggal disesuaikan otomatis. HRD butuh minimal ${master.jlt_min_days} hari kerja.`
+                        : slaSource === 'FLEXIBLE'
+                            ? 'Jabatan fleksibel. HRD akan bekerja sesuai kebutuhan.'
+                            : 'Tanggal sudah realistis. HRD akan bekerja sesuai target.'
+                }
+            }
+        });
 
     } catch (error) {
         await connection.rollback();
