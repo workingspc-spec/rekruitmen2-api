@@ -8,14 +8,19 @@ const { addWorkdays, countWorkdays, formatDateSafe } = require('../utils/workday
 /**
  * =====================================================================
  * MODULE: RECRUITMENT REQUEST
- * Flow: Peminta buat → Atasan approve → HRD approve
+ * Flow: Peminta buat → Atasan approve (status=9, "bayangan") → HRD approve
+ *       (status=1 + HRD=1, baru terlihat di Aplikasi Seleksi lama)
+ *
+ * STATUS tpk_approveatasan:
+ *   0 = Belum diproses atasan
+ *   9 = DISETUJUI ATASAN (status bayangan — menunggu HRD, TIDAK terlihat di Aplikasi Seleksi)
+ *   1 = DISETUJUI ATASAN + HRD (diset saat HRD approve — BARU terlihat di Aplikasi Seleksi)
+ *   2 = DITOLAK
  * =====================================================================
  */
 
 /**
  * VALIDASI TANGGAL BUTUH DARI DATABASE
- * ignoreLeadTime = true → mode Re-Schedule (hanya cek tidak boleh masa lalu)
- * ignoreLeadTime = false → mode Draft (cek full lead time)
  */
 async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLeadTime = false) {
     try {
@@ -50,14 +55,10 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
         const { min_days, is_flexible } = rows[0];
         if (is_flexible === 1) return { valid: true };
 
-        // 🔥 Hitung dari BESOK (sesuai pesan bisnis)
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
 
-        // Karena besok sudah dihitung sebagai hari pertama,
-        // maka tambahkan (min_days - 1)
         const minDateObj = addWorkdays(tomorrow, min_days - 1);
-
         const minDateStr = formatDateSafe(minDateObj);
 
         if (requestedDate < minDateObj) {
@@ -79,7 +80,6 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
 
 /**
  * GET /api/recruitment/jabatan-rules
- * Aturan lead time per jabatan untuk validasi form di frontend
  */
 router.get('/jabatan-rules', authenticate, async (req, res) => {
     try {
@@ -112,7 +112,12 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
 
 /**
  * GET /api/recruitment/my-requests
- * Daftar permintaan — HRD lihat semua, user lihat miliknya
+ *
+ * STATUS tpk_approveatasan:
+ *   9  = Approved Atasan (bayangan, menunggu HRD)
+ *   1  = Approved Atasan + HRD (final)
+ *   2  = Rejected
+ *   0  = Belum diproses
  */
 router.get('/my-requests', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
@@ -132,9 +137,10 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 COALESCE(p.tpk_approveatasan, 0) as tpk_approveatasan,
                 COALESCE(p.tpk_approveHRD, 0) as tpk_approveHRD,
                 CASE 
-                    WHEN p.tpk_approveHRD = 1 THEN 'APPROVED HRD'
-                    WHEN p.tpk_approveatasan = 1 THEN 'APPROVED ATASAN'
+                    WHEN p.tpk_approveHRD = 2 THEN 'REJECTED HRD'
                     WHEN p.tpk_approveatasan = 2 THEN 'REJECTED ATASAN'
+                    WHEN p.tpk_approveHRD = 1 THEN 'APPROVED HRD'
+                    WHEN p.tpk_approveatasan IN (1, 9) THEN 'APPROVED ATASAN'
                     ELSE 'BLM APPROVE'
                 END as status,
                 DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
@@ -165,7 +171,6 @@ router.get('/my-requests', authenticate, async (req, res) => {
 
 /**
  * GET /api/recruitment/detail
- * Detail satu permintaan lengkap beserta info SLA
  */
 router.get('/detail', authenticate, async (req, res) => {
     const { nomor } = req.query;
@@ -233,7 +238,6 @@ router.get('/detail', authenticate, async (req, res) => {
 
 /**
  * POST /api/recruitment/save
- * Buat permintaan baru ATAU edit permintaan yang masih draft / sla_is_editable
  */
 router.post('/save', authenticate, async (req, res) => {
     const {
@@ -320,14 +324,12 @@ router.post('/save', authenticate, async (req, res) => {
                 });
             }
 
-            // Re-schedule: update SLA dan buka kunci
             if (isEditable) {
                 await connection.execute(
                     `UPDATE rekruitmen2.t_recruitment_sla SET
                         sla_job_code = ?,
                         sla_original_requested_date = ?,
                         sla_system_ceiling_date = ?,
-                        /* ✅ TAMBAHAN: Update sla_source agar UI Timeline tidak bingung */
                         sla_source = CASE 
                             WHEN ? >= sla_system_floor_date THEN 'USER' 
                             ELSE sla_source 
@@ -340,16 +342,7 @@ router.post('/save', authenticate, async (req, res) => {
                             '\n[', NOW(), '] Re-schedule oleh User (New Date: ', ?, ')'
                         )
                     WHERE sla_tpk_nomor = ?`,
-                    [
-                        jab_kode, 
-                        tgl_butuh, 
-                        tgl_butuh, 
-                        tgl_butuh, // <-- Parameter untuk pengecekan sla_source
-                        tgl_butuh, 
-                        tgl_butuh, 
-                        tgl_butuh, 
-                        tpk_nomor
-                    ]
+                    [jab_kode, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tgl_butuh, tpk_nomor]
                 );
             }
 
@@ -376,7 +369,6 @@ router.post('/save', authenticate, async (req, res) => {
                 tpk_nomor
             ]);
 
-            // Audit log — hanya tulis jika ada perubahan
             const [slaIdRow] = await connection.execute(
                 'SELECT sla_id FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?',
                 [tpk_nomor]
@@ -401,9 +393,6 @@ router.post('/save', authenticate, async (req, res) => {
                 }
             }
 
-            // ✅ FIX #5: Hanya jalankan update PENDING saat isDraft.
-            // Saat isEditable (re-schedule), status SLA sudah CALCULATED — query ini
-            // tidak akan match (dead code). Dibungkus isDraft agar eksplisit & tidak membingungkan.
             if (isDraft) {
                 await connection.execute(
                     `UPDATE rekruitmen2.t_recruitment_sla
@@ -500,7 +489,6 @@ router.post('/save', authenticate, async (req, res) => {
                 tpk_spesifikasi9 || '', tpk_spesifikasi10 || ''
             ]);
 
-            // ✅ PERBAIKAN: Tangkap hasil eksekusi (result) untuk mendapatkan insertId
             const [slaResult] = await connection.execute(
                 `INSERT INTO rekruitmen2.t_recruitment_sla (
                     sla_tpk_nomor, sla_job_code,
@@ -510,9 +498,8 @@ router.post('/save', authenticate, async (req, res) => {
                 [newNomor, jab_kode, tgl_butuh, tgl_butuh]
             );
 
-            // ✅ PERBAIKAN: Catat ke audit log bahwa dokumen baru saja dibuat
-            const newSlaId = slaResult.insertId; // Mengambil ID yang ber-auto_increment
-            
+            const newSlaId = slaResult.insertId;
+
             await connection.execute(
                 `INSERT INTO rekruitmen2.t_pkar_log (
                     tpk_nomor, sla_id, user_kode, field_name, old_value, new_value
@@ -542,7 +529,6 @@ router.post('/save', authenticate, async (req, res) => {
 
 /**
  * GET /api/recruitment/approval/atasan
- * Daftar permintaan bawahan untuk diapprove atasan
  */
 router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
     const { status } = req.query;
@@ -571,7 +557,8 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         const params = [user_kode];
 
         if (status === 'pending')  query += ' AND p.tpk_approveatasan = 0';
-        if (status === 'approved') query += ' AND p.tpk_approveatasan = 1';
+        // ✅ STATUS BAYANGAN: approved oleh atasan bisa berupa 9 (bayangan) atau 1 (final setelah HRD)
+        if (status === 'approved') query += ' AND p.tpk_approveatasan IN (1, 9)';
         if (status === 'rejected') query += ' AND p.tpk_approveatasan = 2';
 
         query += ' ORDER BY p.tpk_tanggal DESC';
@@ -589,7 +576,12 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
 
 /**
  * POST /api/recruitment/approval/atasan/action
- * Atasan approve atau reject — INI YANG TRIGGER KALKULASI SLA
+ *
+ * ✅ PERUBAHAN UTAMA (Status Bayangan):
+ *    APPROVE → tpk_approveatasan = 9  (bukan 1!)
+ *    Angka 9 = "Disetujui Atasan, menunggu verifikasi HRD"
+ *    Aplikasi Seleksi lama hanya mencari angka 1, sehingga data ini
+ *    TIDAK AKAN muncul di sana sampai HRD juga approve.
  */
 router.post('/approval/atasan/action', authenticate, isManager, async (req, res) => {
     const { tpk_nomor, action } = req.body;
@@ -604,7 +596,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         await connection.beginTransaction();
 
         let statusVal = 0;
-        if (action === 'APPROVE')      statusVal = 1;
+        if (action === 'APPROVE')      statusVal = 9;  // ✅ STATUS BAYANGAN: gunakan 9, bukan 1
         else if (action === 'REJECT')  statusVal = 2;
         else {
             await connection.rollback();
@@ -612,14 +604,13 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             return res.status(400).json({ success: false, message: 'Action tidak valid. Gunakan APPROVE atau REJECT.' });
         }
 
-        // SESUDAH — tambah p.tpk_jumlah
         const [checkRows] = await connection.execute(
             `SELECT
                 p.tpk_approveatasan,
                 p.tpk_tanggal,
                 p.tpk_tgl_butuh,
                 p.tpk_jab_kode,
-                p.tpk_jumlah,          /* ✅ TAMBAHAN */
+                p.tpk_jumlah,
                 k.kar_nik_atasan,
                 sla.sla_id,
                 sla.sla_original_requested_date,
@@ -657,11 +648,11 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             [statusVal, tpk_nomor]
         );
 
-        // ========== APPROVE: Catat persetujuan Atasan — SLA dihitung setelah HRD approve ==========
-        if (statusVal === 1) {
+        // ✅ APPROVE: Set status bayangan (9) — catat di SLA notes, BELUM kalkulasi SLA
+        if (statusVal === 9) {
             await connection.execute(
                 `UPDATE rekruitmen2.t_recruitment_sla SET
-                    sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Disetujui Atasan. Menunggu persetujuan HRD.')
+                    sla_notes = CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Disetujui Atasan. Menunggu proses verifikasi HRD.')
                 WHERE sla_tpk_nomor = ? AND sla_status = 'PENDING'`,
                 [tpk_nomor]
             );
@@ -672,10 +663,9 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             return res.json({
                 success: true,
                 message: 'Permintaan berhasil di-APPROVE oleh Atasan. Menunggu persetujuan HRD.'
-                // Tidak ada sla_info — SLA belum dihitung hingga HRD approve
             });
 
-        // ========== REJECT: Batalkan SLA ==========
+        // REJECT: Batalkan SLA
         } else {
             await connection.execute(
                 'UPDATE rekruitmen2.t_recruitment_sla SET sla_status = "CANCELLED" WHERE sla_tpk_nomor = ?',
@@ -700,7 +690,10 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
 /**
  * GET /api/recruitment/approval/hrd
- * Daftar permintaan yang sudah diapprove atasan, menunggu HRD
+ *
+ * ✅ STATUS BAYANGAN: Tampilkan item dengan tpk_approveatasan IN (1, 9)
+ *    - 9 = menunggu HRD (bayangan)
+ *    - 1 = sudah diapprove HRD (untuk filter "approved")
  */
 router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
     const { status } = req.query;
@@ -727,9 +720,12 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            WHERE p.tpk_approveatasan = 1
+            WHERE p.tpk_approveatasan IN (1, 9)
         `;
 
+        // ✅ STATUS BAYANGAN:
+        //   pending  = status bayangan (9) menunggu HRD (tpk_approveHRD = 0)
+        //   approved = sudah diapprove penuh oleh HRD (tpk_approveHRD = 1)
         if (status === 'pending')  query += ' AND p.tpk_approveHRD = 0';
         if (status === 'approved') query += ' AND p.tpk_approveHRD = 1';
 
@@ -748,11 +744,13 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
 
 /**
  * POST /api/recruitment/approval/hrd/action
- * HRD approve ATAU reject permintaan
- * Body: { tpk_nomor, action: 'APPROVE' | 'REJECT', alasan_tolak? }
  *
- * ✅ PERUBAHAN UTAMA: Kalkulasi SLA dipindah dari atasan ke sini.
- * "Argo tiket" baru berjalan setelah HRD approve, bukan setelah atasan approve.
+ * ✅ PERUBAHAN (Status Bayangan):
+ *    Saat HRD APPROVE → set tpk_approveatasan = 1 (dari 9)
+ *    dan tpk_approveHRD = 1
+ *    Sekarang baru angka 1 muncul → terlihat di Aplikasi Seleksi lama.
+ *
+ *    Guard check juga menerima tpk_approveatasan = 9 (bayangan) maupun 1 (backward compat)
  */
 router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
     const { tpk_nomor, action, alasan_tolak } = req.body;
@@ -772,7 +770,6 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
     try {
         await connection.beginTransaction();
 
-        // Ambil data request + SLA (butuh jumlah untuk bulk buffer)
         const [checkRows] = await connection.execute(
             `SELECT
                 p.tpk_approveatasan,
@@ -799,7 +796,8 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
 
         const current = checkRows[0];
 
-        if (current.tpk_approveatasan !== 1) {
+        // ✅ STATUS BAYANGAN: Terima tpk_approveatasan = 9 (baru) atau 1 (data lama, backward compat)
+        if (current.tpk_approveatasan !== 9 && current.tpk_approveatasan !== 1) {
             await connection.rollback();
             connection.release();
             return res.status(403).json({
@@ -838,10 +836,13 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         }
 
         // =====================================================================
-        // APPROVE — Kalkulasi SLA (dipindah dari atasan ke sini)
+        // APPROVE — Kalkulasi SLA + kembalikan tpk_approveatasan dari 9 → 1
         // =====================================================================
+
+        // ✅ STATUS BAYANGAN: Set tpk_approveatasan = 1 (dari 9) sekarang data terlihat
+        //    di Aplikasi Seleksi lama yang mencari angka 1.
         await connection.execute(
-            'UPDATE tpermintaankaryawan SET tpk_approveHRD = 1, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
+            'UPDATE tpermintaankaryawan SET tpk_approveHRD = 1, tpk_approveatasan = 1, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
             [tpk_nomor]
         );
 
@@ -858,7 +859,6 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             master = masterData[0];
         }
 
-        // Bulk request buffer — identik dengan logika di atasan action sebelumnya
         const jumlahDiminta = current.tpk_jumlah || 1;
         let extraDays = 0;
         if (jumlahDiminta > 1) {
@@ -869,10 +869,8 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         if (master.jlt_is_flexible !== 1 && extraDays > 0) {
             master.jlt_min_days += extraDays;
             master.jlt_max_days += extraDays;
-            console.log(`[BULK BUFFER] ${tpk_nomor} — ${jumlahDiminta} orang, extra +${extraDays} hari. Min: ${master.jlt_min_days}, Max: ${master.jlt_max_days}`);
         }
 
-        // "Argo mulai berjalan" saat HRD approve (bukan atasan)
         const approvedAt = new Date();
         approvedAt.setHours(0, 0, 0, 0);
 
@@ -886,7 +884,6 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         let maxTargetDate   = null;
         let slaSource       = null;
 
-        // Hitung approval delay: dari request dibuat → HRD approve
         const approvalDelayDays = countWorkdays(createdAt, approvedAt);
 
         if (master.jlt_is_flexible === 1) {
@@ -911,6 +908,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         const bulkNote   = extraDays > 0
             ? ` (Penambahan +${extraDays} hari untuk pencarian massal ${jumlahDiminta} orang).`
             : '';
+        // ✅ Teks dibersihkan, tidak ada lagi kalimat "status bayangan dilepas"
         const approvalNote = `Disetujui HRD — rekrutmen resmi dibuka.`;
 
         await connection.execute(
@@ -981,8 +979,6 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
 
 /**
  * POST /api/recruitment/complete
- * HRD menutup permintaan secara manual (fallback jika trigger DB tidak jalan)
- * Dipakai ketika rekrutmen sudah selesai di aplikasi lama tapi SLA belum COMPLETED
  */
 router.post('/complete', authenticate, isHRD, async (req, res) => {
     const { tpk_nomor } = req.body;
@@ -1046,7 +1042,6 @@ router.post('/complete', authenticate, isHRD, async (req, res) => {
 
 /**
  * GET /api/recruitment/log/:tpk_nomor
- * Riwayat perubahan (audit trail) untuk satu permintaan
  */
 router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
     const { tpk_nomor } = req.params;
@@ -1074,7 +1069,6 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
             return res.status(403).json({ success: false, message: 'Akses ditolak' });
         }
 
-        // Ambil sla_id untuk query log yang akurat
         const [slaRow] = await db.execute(
             'SELECT sla_id FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?',
             [tpk_nomor]
@@ -1111,17 +1105,11 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
     const userKode = req.user.user_kode;
 
     if (isEditable === undefined || (isEditable !== 0 && isEditable !== 1)) {
-        return res.status(400).json({
-            success: false,
-            message: 'isEditable harus bernilai 0 atau 1'
-        });
+        return res.status(400).json({ success: false, message: 'isEditable harus bernilai 0 atau 1' });
     }
 
     if (isEditable === 1 && (!keterangan || keterangan.trim().length < 5)) {
-        return res.status(400).json({
-            success: false,
-            message: 'Keterangan wajib diisi minimal 5 karakter saat membuka izin edit'
-        });
+        return res.status(400).json({ success: false, message: 'Keterangan wajib diisi minimal 5 karakter saat membuka izin edit' });
     }
 
     const conn = await db.getConnection();
@@ -1129,28 +1117,20 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
         await conn.beginTransaction();
 
         const [slaRows] = await conn.query(
-            `SELECT sla_id, sla_is_editable, sla_status
-             FROM rekruitmen2.t_recruitment_sla
-             WHERE sla_tpk_nomor = ?`,
+            `SELECT sla_id, sla_is_editable, sla_status FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?`,
             [tpkNomor]
         );
 
         if (slaRows.length === 0) {
             await conn.rollback();
-            return res.status(404).json({
-                success: false,
-                message: 'SLA tidak ditemukan'
-            });
+            return res.status(404).json({ success: false, message: 'SLA tidak ditemukan' });
         }
 
         const sla = slaRows[0];
 
         if (sla.sla_status !== 'CALCULATED') {
             await conn.rollback();
-            return res.status(400).json({
-                success: false,
-                message: `Tidak dapat mengubah izin edit, SLA berstatus ${sla.sla_status}`
-            });
+            return res.status(400).json({ success: false, message: `Tidak dapat mengubah izin edit, SLA berstatus ${sla.sla_status}` });
         }
 
         await conn.query(
@@ -1163,14 +1143,9 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
         await conn.query(
             `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, user_kode, field_name, old_value, new_value)
              VALUES (?, ?, ?, ?, ?, ?)`,
-            [
-                tpkNomor,
-                sla.sla_id,
-                userKode,
-                actionLabel,
-                sla.sla_is_editable === 1 ? 'editable' : 'locked',
-                isEditable === 1 ? 'editable' : 'locked'
-            ]
+            [tpkNomor, sla.sla_id, userKode, actionLabel,
+             sla.sla_is_editable === 1 ? 'editable' : 'locked',
+             isEditable === 1 ? 'editable' : 'locked']
         );
 
         if (isEditable === 1 && keterangan) {
@@ -1189,30 +1164,18 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
             message: isEditable === 1
                 ? 'Izin edit tanggal berhasil dibuka. Peminta dapat mengubah tanggal.'
                 : 'Izin edit tanggal berhasil ditutup.',
-            data: {
-                tpkNomor,
-                isEditable,
-                updatedBy: userKode
-            }
+            data: { tpkNomor, isEditable, updatedBy: userKode }
         });
 
     } catch (err) {
         await conn.rollback();
         console.error('[PATCH editable] Error:', err);
-        return res.status(500).json({
-            success: false,
-            message: 'Gagal mengubah izin edit',
-            error: err.message
-        });
+        return res.status(500).json({ success: false, message: 'Gagal mengubah izin edit', error: err.message });
     } finally {
         conn.release();
     }
 });
 
-/**
- * POST /recruitment/:tpkNomor/no-show
- * Akses  : HRD only (user_hrd = 1)
- */
 router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
     const { tpkNomor } = req.params;
     const { bufferDays, keterangan } = req.body;
@@ -1228,22 +1191,15 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
         await conn.beginTransaction();
 
         const [slaRows] = await conn.query(
-            `SELECT sla_id, sla_no_show_buffer_days, sla_status, sla_hired_count
-             FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?`,
+            `SELECT sla_id, sla_no_show_buffer_days, sla_status, sla_hired_count FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?`,
             [tpkNomor]
         );
 
-        if (slaRows.length === 0) {
-            await conn.rollback();
-            return res.status(404).json({ success: false, message: 'SLA tidak ditemukan' });
-        }
+        if (slaRows.length === 0) { await conn.rollback(); return res.status(404).json({ success: false, message: 'SLA tidak ditemukan' }); }
 
         const sla = slaRows[0];
 
-        if (sla.sla_status === 'CANCELLED') {
-            await conn.rollback();
-            return res.status(400).json({ success: false, message: `Tidak dapat mencatat no-show, SLA sudah CANCELLED` });
-        }
+        if (sla.sla_status === 'CANCELLED') { await conn.rollback(); return res.status(400).json({ success: false, message: `Tidak dapat mencatat no-show, SLA sudah CANCELLED` }); }
 
         const oldBuffer = sla.sla_no_show_buffer_days || 0;
         const newBuffer = oldBuffer + parseInt(bufferDays);
@@ -1254,29 +1210,18 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
         }
 
         await conn.query(
-            `UPDATE rekruitmen2.t_recruitment_sla
-             SET sla_no_show_buffer_days = ? ${statusUpdateQuery}
-             WHERE sla_tpk_nomor = ?`,
+            `UPDATE rekruitmen2.t_recruitment_sla SET sla_no_show_buffer_days = ? ${statusUpdateQuery} WHERE sla_tpk_nomor = ?`,
             [newBuffer, tpkNomor]
         );
 
         await conn.query(
             `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, user_kode, field_name, old_value, new_value)
              VALUES (?, ?, ?, 'no_show_buffer', ?, ?)`,
-            [
-                tpkNomor,
-                sla.sla_id,
-                userKode,
-                `${oldBuffer} hari`,
-                `${newBuffer} hari (+${bufferDays}) — ${keterangan.trim()}`
-            ]
+            [tpkNomor, sla.sla_id, userKode, `${oldBuffer} hari`, `${newBuffer} hari (+${bufferDays}) — ${keterangan.trim()}`]
         );
 
         await conn.commit();
-        return res.json({
-            success: true,
-            message: `Buffer no-show berhasil dicatat. ${sla.sla_status === 'COMPLETED' ? 'Tiket kembali dibuka (In Progress).' : ''}`
-        });
+        return res.json({ success: true, message: `Buffer no-show berhasil dicatat.` });
 
     } catch (err) {
         await conn.rollback();
@@ -1286,13 +1231,6 @@ router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
     }
 });
 
-// =========================================================================
-// GET HIRED CANDIDATES (Daftar Kandidat Diterima)
-// =========================================================================
-// ✅ FIX #1: Tambah middleware authenticate — sebelumnya route ini terbuka tanpa auth
-// =========================================================================
-// GET HIRED CANDIDATES (Daftar Kandidat Diterima)
-// =========================================================================
 router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
     try {
         const { tpkNomor } = req.params;
@@ -1310,26 +1248,13 @@ router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
 
         rows.forEach(row => {
             const rawNama = row.nama || 'Tanpa Nama';
-            
-            // ✅ FIX: Jika ada ENTER, pecah jadi beberapa orang
             if (rawNama.includes('\n')) {
                 const splitNames = rawNama.split(/\r?\n/).filter(n => n.trim() !== '');
                 splitNames.forEach(namePiece => {
-                    processedCandidates.push({
-                        rkt_nomor: row.rkt_nomor,
-                        nama: namePiece.trim(),
-                        tgl_diterima: row.tgl_diterima,
-                        is_grouped: true // Penanda data borongan
-                    });
+                    processedCandidates.push({ rkt_nomor: row.rkt_nomor, nama: namePiece.trim(), tgl_diterima: row.tgl_diterima, is_grouped: true });
                 });
             } else {
-                // Normal
-                processedCandidates.push({
-                    rkt_nomor: row.rkt_nomor,
-                    nama: rawNama.trim(),
-                    tgl_diterima: row.tgl_diterima,
-                    is_grouped: row.rpk_jumlah > 1
-                });
+                processedCandidates.push({ rkt_nomor: row.rkt_nomor, nama: rawNama.trim(), tgl_diterima: row.tgl_diterima, is_grouped: row.rpk_jumlah > 1 });
             }
         });
 
@@ -1340,11 +1265,6 @@ router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
     }
 });
 
-// =========================================================================
-// CANCEL CANDIDATE (Batalkan / No-Show langsung ke database legacy)
-// =========================================================================
-// ✅ FIX #2a: Tambah middleware authenticate — sebelumnya route ini terbuka tanpa auth
-// ✅ FIX #2b: req.user.user_kode (bukan req.user.userKode yang selalu undefined)
 router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
     const connection = await db.getConnection();
     try {
@@ -1358,36 +1278,22 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
             [tpkNomor, rktNomor]
         );
 
-        if (realisasi.length === 0) {
-            await connection.rollback();
-            return res.status(404).json({ success: false, message: 'Kandidat tidak ditemukan' });
-        }
+        if (realisasi.length === 0) { await connection.rollback(); return res.status(404).json({ success: false, message: 'Kandidat tidak ditemukan' }); }
 
         const namaKandidat = realisasi[0].rpk_keterangannama || '';
         if (realisasi[0].rpk_jumlah > 1 || namaKandidat.includes('\n')) {
             await connection.rollback();
-            return res.status(400).json({
-                success: false,
-                message: 'Data kandidat ini diinput secara grup (borongan) di sistem lama. Harap lakukan pembatalan manual melalui Aplikasi HRD Desktop agar data lain tidak terhapus.'
-            });
+            return res.status(400).json({ success: false, message: 'Data kandidat ini diinput secara grup (borongan) di sistem lama.' });
         }
 
-        // Ambil sla_id sebelum DELETE
-        const [slaRow] = await connection.query(
-            'SELECT sla_id FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?',
-            [tpkNomor]
-        );
+        const [slaRow] = await connection.query('SELECT sla_id FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?', [tpkNomor]);
         const sla_id = slaRow.length > 0 ? slaRow[0].sla_id : null;
 
-        await connection.query(
-            'DELETE FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
-            [tpkNomor, rktNomor]
-        );
+        await connection.query('DELETE FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?', [tpkNomor, rktNomor]);
 
         await connection.query(`
             UPDATE rekruitmen2.t_recruitment_sla 
-            SET 
-                sla_hired_count = GREATEST(0, sla_hired_count - 1),
+            SET sla_hired_count = GREATEST(0, sla_hired_count - 1),
                 sla_status = 'CALCULATED',
                 sla_no_show_buffer_days = sla_no_show_buffer_days + ?,
                 sla_completed_at = NULL
@@ -1396,8 +1302,7 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
 
         const logNotes = `Kandidat dibatalkan (No-Show). Buffer +${bufferDays} hari ditambahkan. Alasan: ${keterangan}`;
         await connection.query(
-            `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, user_kode, field_name, old_value, new_value)
-             VALUES (?, ?, ?, 'cancel_candidate', 'Hired', ?)`,
+            `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, user_kode, field_name, old_value, new_value) VALUES (?, ?, ?, 'cancel_candidate', 'Hired', ?)`,
             [tpkNomor, sla_id, userKode, logNotes]
         );
 
@@ -1413,94 +1318,70 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
     }
 });
 
-// DELETE /api/recruitment/batch-delete
-// Body: { tpkNomors: ["001/HRD/PKAR/02/2026", "002/HRD/PKAR/02/2026"] }
 router.delete('/batch-delete', authenticate, async (req, res) => {
-  const { tpkNomors } = req.body;
-  const userKode = req.user.user_kode;  // NIK dari JWT
+    const { tpkNomors } = req.body;
+    const userKode = req.user.user_kode;
 
-  if (!Array.isArray(tpkNomors) || tpkNomors.length === 0) {
-    return res.status(400).json({ success: false, message: 'Tidak ada data yang dipilih' });
-  }
-  if (tpkNomors.length > 20) {
-    return res.status(400).json({ success: false, message: 'Maksimal 20 item per batch' });
-  }
-
-  const placeholders = tpkNomors.map(() => '?').join(',');
-  const conn = await db.getConnection();
-
-  try {
-    await conn.beginTransaction();
-
-    // Guard: pastikan semua PKAR milik user ini dan belum diapprove atasan
-    const [rows] = await conn.execute(
-      `SELECT tpk_nomor FROM tpermintaankaryawan 
-       WHERE tpk_nomor IN (${placeholders}) 
-         AND tpk_peminta = ? 
-         AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
-      [...tpkNomors, userKode]
-    );
-
-if (rows.length !== tpkNomors.length) {
-      await conn.rollback();
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Beberapa permintaan tidak valid atau sudah diproses atasan' 
-      });
+    if (!Array.isArray(tpkNomors) || tpkNomors.length === 0) {
+        return res.status(400).json({ success: false, message: 'Tidak ada data yang dipilih' });
+    }
+    if (tpkNomors.length > 20) {
+        return res.status(400).json({ success: false, message: 'Maksimal 20 item per batch' });
     }
 
-    // ✅ PERBAIKAN: 1. Ambil sla_id terlebih dahulu sebelum dihapus
-    const [slaRows] = await conn.query(
-      `SELECT sla_tpk_nomor, sla_id FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders})`,
-      tpkNomors
-    );
+    const placeholders = tpkNomors.map(() => '?').join(',');
+    const conn = await db.getConnection();
 
-    // Buat dictionary/map agar mudah mencocokkan tpk_nomor dengan sla_id
-    const slaMap = {};
-    slaRows.forEach(row => {
-      slaMap[row.sla_tpk_nomor] = row.sla_id;
-    });
+    try {
+        await conn.beginTransaction();
 
-    // ✅ PERBAIKAN: 2. Masukkan sla_id ke dalam array logValues
-    const logValues = tpkNomors.map(nomor => [
-      nomor, 
-      slaMap[nomor] || null, // Ambil sla_id dari map, jika tidak ada fallback ke null
-      'batch_deleted', 
-      'PENDING', 
-      'DELETED_BY_USER', 
-      userKode,
-      new Date()
-    ]);
+        const [rows] = await conn.execute(
+            `SELECT tpk_nomor FROM tpermintaankaryawan 
+             WHERE tpk_nomor IN (${placeholders}) 
+               AND tpk_peminta = ? 
+               AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
+            [...tpkNomors, userKode]
+        );
 
-    // ✅ PERBAIKAN: 3. Tambahkan kolom sla_id pada query INSERT
-    await conn.query(
-      `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, field_name, old_value, new_value, user_kode, created_at) VALUES ?`,
-      [logValues]
-    );
+        if (rows.length !== tpkNomors.length) {
+            await conn.rollback();
+            return res.status(403).json({ success: false, message: 'Beberapa permintaan tidak valid atau sudah diproses atasan' });
+        }
 
-    // 2. Delete dari rekruitmen2.t_recruitment_sla (lokal — bisa pakai transaction)
-    await conn.execute(
-      `DELETE FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders}) AND sla_status = 'PENDING'`,
-      tpkNomors
-    );
+        const [slaRows] = await conn.query(
+            `SELECT sla_tpk_nomor, sla_id FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders})`,
+            tpkNomors
+        );
 
-    // 3. Delete dari tpermintaankaryawan (FEDERATED — di luar transaction lokal)
-    await conn.execute(
-      `DELETE FROM tpermintaankaryawan 
-       WHERE tpk_nomor IN (${placeholders}) 
-         AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
-      tpkNomors
-    );
+        const slaMap = {};
+        slaRows.forEach(row => { slaMap[row.sla_tpk_nomor] = row.sla_id; });
 
-    await conn.commit();
-    res.json({ success: true, deleted: tpkNomors.length });
+        const logValues = tpkNomors.map(nomor => [nomor, slaMap[nomor] || null, 'batch_deleted', 'PENDING', 'DELETED_BY_USER', userKode, new Date()]);
 
-  } catch (err) {
-    await conn.rollback();
-    res.status(500).json({ success: false, message: err.message });
-  } finally {
-    conn.release();
-  }
+        await conn.query(
+            `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, field_name, old_value, new_value, user_kode, created_at) VALUES ?`,
+            [logValues]
+        );
+
+        await conn.execute(
+            `DELETE FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders}) AND sla_status = 'PENDING'`,
+            tpkNomors
+        );
+
+        await conn.execute(
+            `DELETE FROM tpermintaankaryawan WHERE tpk_nomor IN (${placeholders}) AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
+            tpkNomors
+        );
+
+        await conn.commit();
+        res.json({ success: true, deleted: tpkNomors.length });
+
+    } catch (err) {
+        await conn.rollback();
+        res.status(500).json({ success: false, message: err.message });
+    } finally {
+        conn.release();
+    }
 });
 
 module.exports = router;
