@@ -16,6 +16,21 @@ dotenv.config({ path: envFile });
 console.log(`📦 Using env file: ${envFile}`);
 console.log(`📍 Environment: ${process.env.NODE_ENV}`);
 
+// ================= [FIX B-03] VALIDASI JWT_SECRET =================
+// Harus dilakukan SETELAH dotenv.config() agar variabel env sudah terbaca.
+// Jika JWT_SECRET tidak di-set atau terlalu pendek, server menolak start
+// daripada menjalankan dengan secret undefined/lemah yang membuat semua
+// token menjadi identik secara kriptografis antar deployment.
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+    console.error('');
+    console.error('❌ FATAL: JWT_SECRET tidak valid!');
+    console.error('   Pastikan JWT_SECRET sudah di-set di env file dan panjangnya minimal 32 karakter.');
+    console.error(`   Env file aktif: ${envFile}`);
+    console.error('   Contoh: JWT_SECRET=your-very-long-and-secure-secret-key-here');
+    console.error('');
+    process.exit(1);
+}
+
 // ================= IMPORT MODULE =================
 const express    = require('express');
 const cors       = require('cors');
@@ -118,8 +133,6 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 
 // [FIX H2] Callback dibuat async agar holidays di-load SEBELUM SLA cron berjalan.
-// Sebelumnya refreshHolidaysFromDB dipanggil fire-and-forget, sehingga cron pertama
-// bisa berjalan dengan FALLBACK_HOLIDAYS bukan data DB. Sekarang di-await terlebih dulu.
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`✅ Server running on port ${PORT}`);
 
