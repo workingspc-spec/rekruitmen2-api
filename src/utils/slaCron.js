@@ -1,6 +1,9 @@
 const cron = require('node-cron');
 const db   = require('../config/db');
-const { fullSync: syncIndexHelper } = require('./tpkIndexSync'); // [BARU]
+const { fullSync: syncIndexHelper } = require('./tpkIndexSync');
+
+// [FIX H4] Batas maksimal panjang sla_notes agar tidak tumbuh tanpa batas
+const MAX_NOTES_LENGTH = 3000;
 
 const runSlaSync = async () => {
     let connection;
@@ -16,11 +19,12 @@ const runSlaSync = async () => {
             const tpkNomors    = activeSlas.map(s => s.sla_tpk_nomor);
             const placeholders = tpkNomors.map(() => '?').join(',');
 
+            // [FIX M6] Tambahkan prefix hrd2. agar tidak bergantung pada DB_NAME default
             const [hiredData] = await connection.query(`
                 SELECT 
                     rpk_tpk_nomor AS tlp_tpk_nomor, 
                     SUM(GREATEST(COALESCE(rpk_jumlah, 1), 1)) as total_hired 
-                FROM triilpermintaankaryawan 
+                FROM hrd2.triilpermintaankaryawan 
                 WHERE rpk_tpk_nomor IN (${placeholders})
                 GROUP BY rpk_tpk_nomor
             `, tpkNomors);
@@ -55,16 +59,17 @@ const runSlaSync = async () => {
                 const tpksToClose       = toComplete.map(row => row.sla_tpk_nomor);
                 const placeholdersClose = tpksToClose.map(() => '?').join(',');
 
+                // [FIX H4] LEFT(..., MAX_NOTES_LENGTH) agar sla_notes tidak overflow
                 await connection.query(`
                     UPDATE rekruitmen2.t_recruitment_sla 
                     SET 
                         sla_status       = 'COMPLETED',
                         sla_completed_at = NOW(),
                         sla_is_editable  = 0,
-                        sla_notes        = CONCAT(
+                        sla_notes        = LEFT(CONCAT(
                             COALESCE(sla_notes, ''),
                             '\n[', NOW(), '] System: Target terpenuhi, SLA otomatis ditutup.'
-                        )
+                        ), ${MAX_NOTES_LENGTH})
                     WHERE sla_tpk_nomor IN (${placeholdersClose})
                 `, tpksToClose);
 
@@ -97,14 +102,10 @@ const runSlaSync = async () => {
         if (connection) connection.release();
     }
 
-    // ── [BARU] Sync shadow index table setelah SLA sync ──────────────────────
-    // fullSync menggunakan pool (bukan connection) — tidak konflik dengan transaksi di atas.
-    // Tujuan: menangkap perubahan approval_status dari aplikasi desktop legacy
-    //         yang tidak melewati backend baru ini.
+    // Sync shadow index table setelah SLA sync
     try {
         await syncIndexHelper(db);
     } catch (syncErr) {
-        // Silent fail — jangan hentikan cron karena shadow sync gagal
         console.warn('[tpkIndexSync] Periodic sync error (non-fatal):', syncErr.message);
     }
 };

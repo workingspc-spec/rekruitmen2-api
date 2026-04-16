@@ -25,12 +25,11 @@ const cookieParser = require('cookie-parser');
 
 const slaCron                   = require('./src/utils/slaCron');
 const { refreshHolidaysFromDB } = require('./src/utils/workdayCalculator');
-const { fullSync: syncIndexHelper } = require('./src/utils/tpkIndexSync'); // [BARU] Shadow table sync
+const { fullSync: syncIndexHelper } = require('./src/utils/tpkIndexSync');
 
 // ================= INIT APP =================
 const app = express();
 
-// Beri tahu Express untuk mempercayai 1 lapis proxy (yaitu Nginx)
 app.set('trust proxy', 1);
 
 // ================= MIDDLEWARE =================
@@ -118,24 +117,28 @@ app.use((err, req, res, next) => {
 // ================= START SERVER =================
 const PORT = process.env.PORT || 3000;
 
+// [FIX H2] Callback dibuat async agar holidays di-load SEBELUM SLA cron berjalan.
+// Sebelumnya refreshHolidaysFromDB dipanggil fire-and-forget, sehingga cron pertama
+// bisa berjalan dengan FALLBACK_HOLIDAYS bukan data DB. Sekarang di-await terlebih dulu.
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`✅ Server running on port ${PORT}`);
 
     const db = require('./src/config/db');
 
-    // ── Load holidays dari DB (non-blocking) ─────────────────────────────────
-    refreshHolidaysFromDB(db).catch(err => {
+    // ── [FIX H2] Load holidays DULU, tunggu selesai ──────────────────────────
+    try {
+        await refreshHolidaysFromDB(db);
+        console.log('✅ Holiday data loaded from DB.');
+    } catch (err) {
         console.warn('⚠️ Initial holiday load failed, fallback active:', err.message);
-    });
+    }
 
-    // ── [BARU] Sync shadow index table (tpk_index_helper) ───────────────────
-    // Ini memastikan shadow table terisi penuh saat server start sehingga
-    // query pertama langsung menggunakan index tanpa menunggu cron pertama.
+    // ── Sync shadow index table (non-blocking — cron akan retry) ─────────────
     syncIndexHelper(db).catch(err => {
         console.warn('⚠️ Initial tpk_index_helper sync failed (akan dicoba ulang oleh cron):', err.message);
     });
 
-    // ── Init SLA cron ─────────────────────────────────────────────────────────
+    // ── Init SLA cron (SETELAH holidays di-load) ──────────────────────────────
     try {
         slaCron.runSlaSync();
         console.log('🔄 SLA Synchronization Service started.');
