@@ -25,6 +25,7 @@ const cookieParser = require('cookie-parser');
 
 const slaCron                   = require('./src/utils/slaCron');
 const { refreshHolidaysFromDB } = require('./src/utils/workdayCalculator');
+const { fullSync: syncIndexHelper } = require('./src/utils/tpkIndexSync'); // [BARU] Shadow table sync
 
 // ================= INIT APP =================
 const app = express();
@@ -55,42 +56,32 @@ app.use(cors({
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true, // Diperlukan untuk httpOnly cookie
+    credentials: true,
 }));
 
 // ================= SECURITY =================
-// [FIX-MEDIUM] Body size limit — cegah DoS via payload besar
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
-
-// [FIX-MEDIUM] Cookie parser — untuk mendukung httpOnly cookie auth
 app.use(cookieParser());
-
-// [FIX-MEDIUM] Helmet dengan konfigurasi eksplisit
 app.use(helmet({
     crossOriginResourcePolicy: false,
-    contentSecurityPolicy: process.env.NODE_ENV === 'production'
-        ? undefined   // Gunakan default CSP di production
-        : false,      // Matikan CSP di local/dev agar tidak mengganggu debugging
+    contentSecurityPolicy: process.env.NODE_ENV === 'production' ? undefined : false,
     hsts: process.env.NODE_ENV === 'production'
         ? { maxAge: 31536000, includeSubDomains: true }
-        : false,      // Hanya aktifkan HSTS di production (HTTPS)
+        : false,
 }));
 
 // ================= GLOBAL RATE LIMITER =================
-// [FIX-KRITIS] Semua endpoint /api dilindungi rate limiter global
 const globalApiLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,  // 15 menit
-    max: 300,                   // Maks 300 request per IP per 15 menit
+    windowMs: 15 * 60 * 1000,
+    max: 300,
     standardHeaders: true,
     legacyHeaders: false,
     message: {
         success: false,
         message: 'Terlalu banyak permintaan. Coba lagi dalam 15 menit.'
     },
-    // trust proxy sudah di-set di app, IP real dari X-Forwarded-For digunakan
     skip: (req) => {
-        // Jangan rate-limit request dari localhost saat development
         const ip = req.ip || req.connection.remoteAddress;
         return process.env.NODE_ENV === 'local' && (ip === '127.0.0.1' || ip === '::1');
     }
@@ -120,7 +111,6 @@ app.use((err, req, res, next) => {
     res.status(500).json({
         success: false,
         message: 'Terjadi kesalahan server',
-        // [FIX-MEDIUM] Hanya tampilkan detail error di non-production
         ...(process.env.NODE_ENV !== 'production' && { error: err.message }),
     });
 });
@@ -131,18 +121,25 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`✅ Server running on port ${PORT}`);
 
-    // ── Init SLA cron ─────────────────────────────────────────────
+    const db = require('./src/config/db');
+
+    // ── Load holidays dari DB (non-blocking) ─────────────────────────────────
+    refreshHolidaysFromDB(db).catch(err => {
+        console.warn('⚠️ Initial holiday load failed, fallback active:', err.message);
+    });
+
+    // ── [BARU] Sync shadow index table (tpk_index_helper) ───────────────────
+    // Ini memastikan shadow table terisi penuh saat server start sehingga
+    // query pertama langsung menggunakan index tanpa menunggu cron pertama.
+    syncIndexHelper(db).catch(err => {
+        console.warn('⚠️ Initial tpk_index_helper sync failed (akan dicoba ulang oleh cron):', err.message);
+    });
+
+    // ── Init SLA cron ─────────────────────────────────────────────────────────
     try {
         slaCron.runSlaSync();
         console.log('🔄 SLA Synchronization Service started.');
     } catch (err) {
         console.error('⚠️ Failed to start SLA Sync Service:', err.message);
     }
-
-    // ── Load holidays dari DB (non-blocking) ─────────────────────
-    // [FIX-INFO] Inject db secara eksplisit untuk menghindari circular dependency
-    const db = require('./src/config/db');
-    refreshHolidaysFromDB(db).catch(err => {
-        console.warn('⚠️ Initial holiday load failed, fallback active:', err.message);
-    });
 });

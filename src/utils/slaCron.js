@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const db   = require('../config/db');
+const { fullSync: syncIndexHelper } = require('./tpkIndexSync'); // [BARU]
 
 const runSlaSync = async () => {
     let connection;
@@ -41,11 +42,10 @@ const runSlaSync = async () => {
                 WHERE sla_tpk_nomor IN (${placeholders})
             `, [...flatValues, ...tpkNomors]);
 
-            // Ambil sla_id sekalian untuk keperluan log
             const [toComplete] = await connection.query(`
                 SELECT sla.sla_tpk_nomor, sla.sla_id
                 FROM rekruitmen2.t_recruitment_sla sla
-                JOIN tpermintaankaryawan tpk ON sla.sla_tpk_nomor = tpk.tpk_nomor
+                JOIN hrd2.tpermintaankaryawan tpk ON sla.sla_tpk_nomor = tpk.tpk_nomor
                 WHERE sla.sla_hired_count >= tpk.tpk_jumlah 
                   AND sla.sla_status      = 'CALCULATED'
                   AND sla.sla_tpk_nomor  IN (${placeholders})
@@ -68,7 +68,6 @@ const runSlaSync = async () => {
                     WHERE sla_tpk_nomor IN (${placeholdersClose})
                 `, tpksToClose);
 
-                // sla_id sudah tersedia dari query toComplete
                 const logValues = toComplete.map(row => [
                     row.sla_tpk_nomor,
                     row.sla_id,
@@ -96,6 +95,17 @@ const runSlaSync = async () => {
         console.error('SLA Sync Error:', error.message);
     } finally {
         if (connection) connection.release();
+    }
+
+    // ── [BARU] Sync shadow index table setelah SLA sync ──────────────────────
+    // fullSync menggunakan pool (bukan connection) — tidak konflik dengan transaksi di atas.
+    // Tujuan: menangkap perubahan approval_status dari aplikasi desktop legacy
+    //         yang tidak melewati backend baru ini.
+    try {
+        await syncIndexHelper(db);
+    } catch (syncErr) {
+        // Silent fail — jangan hentikan cron karena shadow sync gagal
+        console.warn('[tpkIndexSync] Periodic sync error (non-fatal):', syncErr.message);
     }
 };
 

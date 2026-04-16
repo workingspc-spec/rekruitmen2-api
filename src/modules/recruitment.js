@@ -5,6 +5,14 @@ const router = express.Router();
 const { authenticate, isHRD, isManager } = require('../middleware/authMiddleware');
 const { addWorkdays, countWorkdays, formatDateSafe } = require('../utils/workdayCalculator');
 
+// [BARU] Shadow table sync — write-through ke tpk_index_helper saat setiap
+// perubahan data tpermintaankaryawan agar query bisa pakai indexed lookup.
+const {
+    upsertRow      : syncUpsert,
+    updateApproval : syncApproval,
+    deleteRows     : syncDeleteRows,
+} = require('../utils/tpkIndexSync');
+
 /**
  * =====================================================================
  * MODULE: RECRUITMENT REQUEST
@@ -13,8 +21,8 @@ const { addWorkdays, countWorkdays, formatDateSafe } = require('../utils/workday
  *
  * STATUS tpk_approveatasan:
  *   0 = Belum diproses atasan
- *   9 = DISETUJUI ATASAN (status bayangan — menunggu HRD, TIDAK terlihat di Aplikasi Seleksi)
- *   1 = DISETUJUI ATASAN + HRD (diset saat HRD approve — BARU terlihat di Aplikasi Seleksi)
+ *   9 = DISETUJUI ATASAN (status bayangan — menunggu HRD)
+ *   1 = DISETUJUI ATASAN + HRD (diset saat HRD approve)
  *   2 = DITOLAK
  * =====================================================================
  */
@@ -32,10 +40,7 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
 
         if (ignoreLeadTime) {
             if (requestedDate < today) {
-                return {
-                    valid: false,
-                    message: 'Untuk re-schedule, tanggal minimal adalah hari ini.'
-                };
+                return { valid: false, message: 'Untuk re-schedule, tanggal minimal adalah hari ini.' };
             }
             return { valid: true };
         }
@@ -113,51 +118,65 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
 /**
  * GET /api/recruitment/my-requests
  *
- * STATUS tpk_approveatasan:
- *   9  = Approved Atasan (bayangan, menunggu HRD)
- *   1  = Approved Atasan + HRD (final)
- *   2  = Rejected
- *   0  = Belum diproses
+ * [OPTIMASI] Query menggunakan tpk_index_helper untuk non-HRD:
+ *   - Non-HRD: h.tpk_peminta (INDEX idx_helper_peminta) → join PK ke tpermintaankaryawan
+ *   - HRD: tidak ada filter tpk_peminta, langsung dari tpermintaankaryawan (semua data)
  */
 router.get('/my-requests', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd = req.user.user_hrd;
 
     try {
-        const whereClause = is_hrd ? '1=1' : 'p.tpk_peminta = ?';
-        const params = is_hrd ? [] : [user_kode];
+        let rows;
 
-        const [rows] = await db.execute(`
-            SELECT 
-                p.tpk_nomor,
-                TRIM(p.tpk_peminta) as tpk_peminta,
-                j.jab_nama,
-                p.tpk_bagian,
-                p.tpk_jumlah,
-                COALESCE(p.tpk_approveatasan, 0) as tpk_approveatasan,
-                COALESCE(p.tpk_approveHRD, 0) as tpk_approveHRD,
-                CASE 
-                    WHEN p.tpk_approveHRD = 2 THEN 'REJECTED HRD'
-                    WHEN p.tpk_approveatasan = 2 THEN 'REJECTED ATASAN'
-                    WHEN p.tpk_approveHRD = 1 THEN 'APPROVED HRD'
-                    WHEN p.tpk_approveatasan IN (1, 9) THEN 'APPROVED ATASAN'
-                    ELSE 'BLM APPROVE'
-                END as status,
-                DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
-                DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
-                DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
-                DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
-                COALESCE(sla.sla_hired_count, 0) as hired_count,
-                sla.sla_final_target_date,
-                sla.sla_source,
-                COALESCE(sla.sla_status, CASE WHEN COALESCE(p.tpk_approveatasan, 0) = 0 THEN 'PENDING' ELSE 'COMPLETED' END) as sla_status,
-                COALESCE(sla.sla_is_editable, 0) as sla_is_editable
-            FROM tpermintaankaryawan p
-            INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
-            LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            WHERE ${whereClause}
-            ORDER BY p.tpk_tanggal DESC
-        `, params);
+        const SELECT_COLS = `
+            p.tpk_nomor,
+            TRIM(p.tpk_peminta) as tpk_peminta,
+            j.jab_nama,
+            p.tpk_bagian,
+            p.tpk_jumlah,
+            COALESCE(p.tpk_approveatasan, 0) as tpk_approveatasan,
+            COALESCE(p.tpk_approveHRD, 0) as tpk_approveHRD,
+            CASE 
+                WHEN p.tpk_approveHRD = 2 THEN 'REJECTED HRD'
+                WHEN p.tpk_approveatasan = 2 THEN 'REJECTED ATASAN'
+                WHEN p.tpk_approveHRD = 1 THEN 'APPROVED HRD'
+                WHEN p.tpk_approveatasan IN (1, 9) THEN 'APPROVED ATASAN'
+                ELSE 'BLM APPROVE'
+            END as status,
+            DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
+            DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
+            DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
+            DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
+            COALESCE(sla.sla_hired_count, 0) as hired_count,
+            sla.sla_final_target_date,
+            sla.sla_source,
+            COALESCE(sla.sla_status, CASE WHEN COALESCE(p.tpk_approveatasan, 0) = 0 THEN 'PENDING' ELSE 'COMPLETED' END) as sla_status,
+            COALESCE(sla.sla_is_editable, 0) as sla_is_editable
+        `;
+
+        if (is_hrd) {
+            // HRD: muat semua — tidak ada filter tpk_peminta, shadow table tidak diperlukan
+            [rows] = await db.execute(`
+                SELECT ${SELECT_COLS}
+                FROM hrd2.tpermintaankaryawan p
+                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                ORDER BY p.tpk_tanggal DESC
+            `);
+        } else {
+            // [OPTIMASI] Non-HRD: gunakan shadow table index pada tpk_peminta
+            // h.tpk_peminta → idx_helper_peminta → O(log n) bukan O(n) full scan
+            [rows] = await db.execute(`
+                SELECT ${SELECT_COLS}
+                FROM rekruitmen2.tpk_index_helper h
+                INNER JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
+                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                WHERE h.tpk_peminta = ?
+                ORDER BY h.tpk_tanggal DESC
+            `, [user_kode]);
+        }
 
         res.json({ success: true, data: rows });
 
@@ -216,8 +235,8 @@ router.get('/detail', authenticate, async (req, res) => {
                 sla.sla_calculated_at,
                 sla.sla_completed_at,
                 sla.sla_hired_count
-            FROM tpermintaankaryawan t
-            JOIN tjabatan j ON j.jab_kode = t.tpk_jab_kode
+            FROM hrd2.tpermintaankaryawan t
+            JOIN hrd2.tjabatan j ON j.jab_kode = t.tpk_jab_kode
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = t.tpk_nomor
             WHERE t.tpk_nomor = ?
         `, [nomor]);
@@ -238,6 +257,9 @@ router.get('/detail', authenticate, async (req, res) => {
 
 /**
  * POST /api/recruitment/save
+ *
+ * [OPTIMASI] Setelah INSERT ke tpermintaankaryawan, langsung upsert ke
+ * tpk_index_helper dalam transaksi yang sama (write-through sync).
  */
 router.post('/save', authenticate, async (req, res) => {
     const {
@@ -288,7 +310,7 @@ router.post('/save', authenticate, async (req, res) => {
                     p.tpk_tgl_butuh,
                     p.tpk_jab_kode,
                     s.sla_is_editable
-                FROM tpermintaankaryawan p
+                FROM hrd2.tpermintaankaryawan p
                 LEFT JOIN rekruitmen2.t_recruitment_sla s ON s.sla_tpk_nomor = p.tpk_nomor
                 WHERE p.tpk_nomor = ?
                 FOR UPDATE`,
@@ -347,7 +369,7 @@ router.post('/save', authenticate, async (req, res) => {
             }
 
             await connection.execute(`
-                UPDATE tpermintaankaryawan SET
+                UPDATE hrd2.tpermintaankaryawan SET
                     tpk_jab_kode = ?, tpk_bagian = ?, tpk_tgl_butuh = ?, tpk_jumlah = ?,
                     tpk_alasan = ?, tpk_alasanlain = ?,
                     tpk_keterangan = ?,  tpk_keterangan2 = ?,  tpk_keterangan3 = ?,  tpk_keterangan4 = ?,
@@ -404,6 +426,10 @@ router.post('/save', authenticate, async (req, res) => {
                 );
             }
 
+            // [BARU] Shadow table tidak perlu diupdate saat edit draft/reschedule
+            // karena tpk_peminta dan approval status tidak berubah.
+            // fullSync() di cron akan menangkap perubahan tpk_tanggal jika diperlukan.
+
             await connection.commit();
             connection.release();
 
@@ -447,7 +473,7 @@ router.post('/save', authenticate, async (req, res) => {
 
             const [maxRows] = await connection.execute(
                 `SELECT MAX(CAST(LEFT(tpk_nomor, 3) AS UNSIGNED)) as max_nomor
-                 FROM tpermintaankaryawan
+                 FROM hrd2.tpermintaankaryawan
                  WHERE YEAR(tpk_tanggal) = ?
                  FOR UPDATE`,
                 [year]
@@ -457,7 +483,7 @@ router.post('/save', authenticate, async (req, res) => {
             const newNomor  = `${nextNomor}/HRD/PKAR/${month}/${year}`;
 
             await connection.execute(`
-                INSERT INTO tpermintaankaryawan (
+                INSERT INTO hrd2.tpermintaankaryawan (
                     tpk_nomor, tpk_peminta, tpk_tanggal, tpk_jab_kode, tpk_bagian,
                     tpk_tgl_butuh, tpk_jumlah, tpk_alasan, tpk_alasanlain,
                     tpk_keterangan,  tpk_keterangan2,  tpk_keterangan3,  tpk_keterangan4,
@@ -488,6 +514,15 @@ router.post('/save', authenticate, async (req, res) => {
                 tpk_spesifikasi5 || '', tpk_spesifikasi6  || '', tpk_spesifikasi7  || '', tpk_spesifikasi8  || '',
                 tpk_spesifikasi9 || '', tpk_spesifikasi10 || ''
             ]);
+
+            // [BARU] Write-through: tambahkan shadow row bersamaan dalam transaksi
+            await syncUpsert(connection, {
+                tpk_nomor:         newNomor,
+                tpk_peminta:       user_kode,
+                tpk_approveatasan: 0,
+                tpk_approveHRD:    0,
+                tpk_tanggal:       new Date().toISOString().split('T')[0],
+            });
 
             const [slaResult] = await connection.execute(
                 `INSERT INTO rekruitmen2.t_recruitment_sla (
@@ -521,9 +556,6 @@ router.post('/save', authenticate, async (req, res) => {
         await connection.rollback();
         connection.release();
 
-        // --- 🟢 MULAI TAMBAHKAN BLOK INI 🟢 ---
-        // Handle race condition: jika dua request bersamaan menghasilkan
-        // nomor yang sama akibat Primary Key / UNIQUE constraint
         if (error.code === 'ER_DUP_ENTRY') {
             console.warn(`⚠️ [recruitment/save] Duplicate nomor detected (race condition). Error: ${error.message}`);
             return res.status(409).json({
@@ -531,7 +563,6 @@ router.post('/save', authenticate, async (req, res) => {
                 message: 'Sistem sedang memproses permintaan lain. Silakan coba simpan sekali lagi dalam beberapa detik.'
             });
         }
-        // --- 🟢 BATAS PENAMBAHAN 🟢 ---
 
         console.error('❌ Error save:', error.message);
         res.status(500).json({ success: false, message: 'Gagal menyimpan data', error: error.message });
@@ -542,13 +573,22 @@ router.post('/save', authenticate, async (req, res) => {
 
 /**
  * GET /api/recruitment/approval/atasan
+ *
+ * [OPTIMASI] Gunakan shadow table untuk filter tpk_approveatasan.
  */
 router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
     const { status } = req.query;
     const user_kode = req.user.user_kode;
 
     try {
-        let query = `
+        // Kondisi filter pada shadow table (indexed) vs direct filter pada tpermintaankaryawan
+        let shadowFilter = '';
+        if (status === 'pending')  shadowFilter = 'AND h.tpk_approveatasan = 0';
+        if (status === 'approved') shadowFilter = 'AND h.tpk_approveatasan IN (1, 9)';
+        if (status === 'rejected') shadowFilter = 'AND h.tpk_approveatasan = 2';
+
+        // [OPTIMASI] Shadow table sebagai driving table untuk filter approval status
+        const [rows] = await db.execute(`
             SELECT
                 p.tpk_nomor,
                 j.jab_nama,
@@ -561,22 +601,15 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
                 DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
                 DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
                 DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd
-            FROM tpermintaankaryawan p
-            INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
-            LEFT JOIN tkaryawan k ON k.kar_Nik = p.tpk_peminta
+            FROM rekruitmen2.tpk_index_helper h
+            INNER JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
+            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             WHERE k.kar_nik_atasan = ?
-        `;
+            ${shadowFilter}
+            ORDER BY p.tpk_tanggal DESC
+        `, [user_kode]);
 
-        const params = [user_kode];
-
-        if (status === 'pending')  query += ' AND p.tpk_approveatasan = 0';
-        // ✅ STATUS BAYANGAN: approved oleh atasan bisa berupa 9 (bayangan) atau 1 (final setelah HRD)
-        if (status === 'approved') query += ' AND p.tpk_approveatasan IN (1, 9)';
-        if (status === 'rejected') query += ' AND p.tpk_approveatasan = 2';
-
-        query += ' ORDER BY p.tpk_tanggal DESC';
-
-        const [rows] = await db.execute(query, params);
         res.json({ success: true, data: rows });
 
     } catch (error) {
@@ -590,11 +623,7 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
 /**
  * POST /api/recruitment/approval/atasan/action
  *
- * ✅ PERUBAHAN UTAMA (Status Bayangan):
- *    APPROVE → tpk_approveatasan = 9  (bukan 1!)
- *    Angka 9 = "Disetujui Atasan, menunggu verifikasi HRD"
- *    Aplikasi Seleksi lama hanya mencari angka 1, sehingga data ini
- *    TIDAK AKAN muncul di sana sampai HRD juga approve.
+ * [OPTIMASI] Setelah update tpk_approveatasan, langsung update shadow table.
  */
 router.post('/approval/atasan/action', authenticate, isManager, async (req, res) => {
     const { tpk_nomor, action } = req.body;
@@ -609,7 +638,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         await connection.beginTransaction();
 
         let statusVal = 0;
-        if (action === 'APPROVE')      statusVal = 9;  // ✅ STATUS BAYANGAN: gunakan 9, bukan 1
+        if (action === 'APPROVE')      statusVal = 9;
         else if (action === 'REJECT')  statusVal = 2;
         else {
             await connection.rollback();
@@ -628,8 +657,8 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                 sla.sla_id,
                 sla.sla_original_requested_date,
                 sla.sla_request_created_at
-             FROM tpermintaankaryawan p
-             LEFT JOIN tkaryawan k ON k.kar_Nik = p.tpk_peminta
+             FROM hrd2.tpermintaankaryawan p
+             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
              LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              WHERE p.tpk_nomor = ?
              FOR UPDATE`,
@@ -657,11 +686,13 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         }
 
         await connection.execute(
-            'UPDATE tpermintaankaryawan SET tpk_approveatasan = ?, tpk_tgl_approveatasan = NOW() WHERE tpk_nomor = ?',
+            'UPDATE hrd2.tpermintaankaryawan SET tpk_approveatasan = ?, tpk_tgl_approveatasan = NOW() WHERE tpk_nomor = ?',
             [statusVal, tpk_nomor]
         );
 
-        // ✅ APPROVE: Set status bayangan (9) — catat di SLA notes, BELUM kalkulasi SLA
+        // [BARU] Write-through sync: update shadow table approval status
+        await syncApproval(connection, tpk_nomor, statusVal, 0);
+
         if (statusVal === 9) {
             await connection.execute(
                 `UPDATE rekruitmen2.t_recruitment_sla SET
@@ -678,8 +709,8 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                 message: 'Permintaan berhasil di-APPROVE oleh Atasan. Menunggu persetujuan HRD.'
             });
 
-        // REJECT: Batalkan SLA
         } else {
+            // REJECT
             await connection.execute(
                 'UPDATE rekruitmen2.t_recruitment_sla SET sla_status = "CANCELLED" WHERE sla_tpk_nomor = ?',
                 [tpk_nomor]
@@ -704,15 +735,18 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 /**
  * GET /api/recruitment/approval/hrd
  *
- * ✅ STATUS BAYANGAN: Tampilkan item dengan tpk_approveatasan IN (1, 9)
- *    - 9 = menunggu HRD (bayangan)
- *    - 1 = sudah diapprove HRD (untuk filter "approved")
+ * [OPTIMASI] Gunakan shadow table untuk filter tpk_approveatasan IN (1, 9).
  */
 router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
     const { status } = req.query;
 
     try {
-        let query = `
+        let shadowFilter = 'AND h.tpk_approveatasan IN (1, 9)'; // Base: sudah disetujui atasan
+        if (status === 'pending')  shadowFilter += ' AND h.tpk_approveHRD = 0';
+        if (status === 'approved') shadowFilter += ' AND h.tpk_approveHRD = 1';
+
+        // [OPTIMASI] Shadow table (indexed) sebagai driving table
+        const [rows] = await db.execute(`
             SELECT
                 p.tpk_nomor,
                 j.jab_nama,
@@ -729,22 +763,15 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
                 sla.sla_source,
                 sla.sla_status,
                 COALESCE(sla.sla_hired_count, 0) as hired_count
-            FROM tpermintaankaryawan p
-            INNER JOIN tjabatan j ON j.jab_kode = p.tpk_jab_kode
-            LEFT JOIN tkaryawan k ON k.kar_Nik = p.tpk_peminta
+            FROM rekruitmen2.tpk_index_helper h
+            INNER JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
+            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            WHERE p.tpk_approveatasan IN (1, 9)
-        `;
+            WHERE 1=1 ${shadowFilter}
+            ORDER BY p.tpk_tanggal DESC
+        `);
 
-        // ✅ STATUS BAYANGAN:
-        //   pending  = status bayangan (9) menunggu HRD (tpk_approveHRD = 0)
-        //   approved = sudah diapprove penuh oleh HRD (tpk_approveHRD = 1)
-        if (status === 'pending')  query += ' AND p.tpk_approveHRD = 0';
-        if (status === 'approved') query += ' AND p.tpk_approveHRD = 1';
-
-        query += ' ORDER BY p.tpk_tanggal DESC';
-
-        const [rows] = await db.execute(query);
         res.json({ success: true, data: rows });
 
     } catch (error) {
@@ -758,12 +785,7 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
 /**
  * POST /api/recruitment/approval/hrd/action
  *
- * ✅ PERUBAHAN (Status Bayangan):
- *    Saat HRD APPROVE → set tpk_approveatasan = 1 (dari 9)
- *    dan tpk_approveHRD = 1
- *    Sekarang baru angka 1 muncul → terlihat di Aplikasi Seleksi lama.
- *
- *    Guard check juga menerima tpk_approveatasan = 9 (bayangan) maupun 1 (backward compat)
+ * [OPTIMASI] Setelah update tpk_approveHRD & tpk_approveatasan, sync shadow table.
  */
 router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
     const { tpk_nomor, action, alasan_tolak } = req.body;
@@ -794,7 +816,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 sla.sla_id,
                 sla.sla_original_requested_date,
                 sla.sla_request_created_at
-             FROM tpermintaankaryawan p
+             FROM hrd2.tpermintaankaryawan p
              LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              WHERE p.tpk_nomor = ?
              FOR UPDATE`,
@@ -809,7 +831,6 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
 
         const current = checkRows[0];
 
-        // ✅ STATUS BAYANGAN: Terima tpk_approveatasan = 9 (baru) atau 1 (data lama, backward compat)
         if (current.tpk_approveatasan !== 9 && current.tpk_approveatasan !== 1) {
             await connection.rollback();
             connection.release();
@@ -825,14 +846,15 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Permintaan sudah pernah diproses oleh HRD' });
         }
 
-        // =====================================================================
-        // REJECT
-        // =====================================================================
+        // ── REJECT ────────────────────────────────────────────────────────────
         if (action === 'REJECT') {
             await connection.execute(
-                'UPDATE tpermintaankaryawan SET tpk_approveHRD = 2, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
+                'UPDATE hrd2.tpermintaankaryawan SET tpk_approveHRD = 2, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
                 [tpk_nomor]
             );
+
+            // [BARU] Sync shadow table: HRD reject
+            await syncApproval(connection, tpk_nomor, current.tpk_approveatasan, 2);
 
             await connection.execute(
                 `UPDATE rekruitmen2.t_recruitment_sla SET
@@ -848,16 +870,15 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             return res.json({ success: true, message: 'Permintaan ditolak oleh HRD.' });
         }
 
-        // =====================================================================
-        // APPROVE — Kalkulasi SLA + kembalikan tpk_approveatasan dari 9 → 1
-        // =====================================================================
-
-        // ✅ STATUS BAYANGAN: Set tpk_approveatasan = 1 (dari 9) sekarang data terlihat
-        //    di Aplikasi Seleksi lama yang mencari angka 1.
+        // ── APPROVE ────────────────────────────────────────────────────────────
+        // Set tpk_approveatasan = 1 (dari 9) agar terlihat di Aplikasi Seleksi lama
         await connection.execute(
-            'UPDATE tpermintaankaryawan SET tpk_approveHRD = 1, tpk_approveatasan = 1, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
+            'UPDATE hrd2.tpermintaankaryawan SET tpk_approveHRD = 1, tpk_approveatasan = 1, tpk_tgl_approveHRD = NOW() WHERE tpk_nomor = ?',
             [tpk_nomor]
         );
+
+        // [BARU] Sync shadow table: HRD approve (atasan=1, hrd=1)
+        await syncApproval(connection, tpk_nomor, 1, 1);
 
         // Ambil aturan lead time jabatan
         const [masterData] = await connection.execute(
@@ -921,7 +942,6 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         const bulkNote   = extraDays > 0
             ? ` (Penambahan +${extraDays} hari untuk pencarian massal ${jumlahDiminta} orang).`
             : '';
-        // ✅ Teks dibersihkan, tidak ada lagi kalimat "status bayangan dilepas"
         const approvalNote = `Disetujui HRD — rekrutmen resmi dibuka.`;
 
         await connection.execute(
@@ -1063,8 +1083,8 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
     try {
         const [authCheck] = await db.execute(
             `SELECT p.tpk_peminta, k.kar_nik_atasan
-             FROM tpermintaankaryawan p
-             LEFT JOIN tkaryawan k ON k.kar_nik = p.tpk_peminta
+             FROM hrd2.tpermintaankaryawan p
+             LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
              WHERE p.tpk_nomor = ?`,
             [tpk_nomor]
         );
@@ -1098,7 +1118,7 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
                 k.kar_nama as user_nama,
                 DATE_FORMAT(log.created_at, '%Y-%m-%d %H:%i:%s') as created_at
              FROM rekruitmen2.t_pkar_log log
-             LEFT JOIN tkaryawan k ON k.kar_nik = log.user_kode
+             LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = log.user_kode
              WHERE (log.sla_id = ? OR (log.sla_id IS NULL AND log.tpk_nomor = ?))
              ORDER BY log.created_at DESC`,
             [sla_id, tpk_nomor]
@@ -1253,7 +1273,7 @@ router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
                 rpk_keterangannama AS nama, 
                 rpk_tanggal AS tgl_diterima,
                 COALESCE(rpk_jumlah, 1) as rpk_jumlah
-            FROM triilpermintaankaryawan
+            FROM hrd2.triilpermintaankaryawan
             WHERE rpk_tpk_nomor = ?
         `, [tpkNomor]);
 
@@ -1287,7 +1307,7 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
         const userKode = req.user.user_kode;
 
         const [realisasi] = await connection.query(
-            'SELECT rpk_keterangannama, COALESCE(rpk_jumlah, 1) as rpk_jumlah FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
+            'SELECT rpk_keterangannama, COALESCE(rpk_jumlah, 1) as rpk_jumlah FROM hrd2.triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?',
             [tpkNomor, rktNomor]
         );
 
@@ -1302,7 +1322,7 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
         const [slaRow] = await connection.query('SELECT sla_id FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?', [tpkNomor]);
         const sla_id = slaRow.length > 0 ? slaRow[0].sla_id : null;
 
-        await connection.query('DELETE FROM triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?', [tpkNomor, rktNomor]);
+        await connection.query('DELETE FROM hrd2.triilpermintaankaryawan WHERE rpk_tpk_nomor = ? AND rpk_nomor = ?', [tpkNomor, rktNomor]);
 
         await connection.query(`
             UPDATE rekruitmen2.t_recruitment_sla 
@@ -1331,6 +1351,11 @@ router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
     }
 });
 
+/**
+ * DELETE /api/recruitment/batch-delete
+ *
+ * [OPTIMASI] Hapus shadow rows bersamaan dalam transaksi.
+ */
 router.delete('/batch-delete', authenticate, async (req, res) => {
     const { tpkNomors } = req.body;
     const userKode = req.user.user_kode;
@@ -1349,7 +1374,7 @@ router.delete('/batch-delete', authenticate, async (req, res) => {
         await conn.beginTransaction();
 
         const [rows] = await conn.execute(
-            `SELECT tpk_nomor FROM tpermintaankaryawan 
+            `SELECT tpk_nomor FROM hrd2.tpermintaankaryawan 
              WHERE tpk_nomor IN (${placeholders}) 
                AND tpk_peminta = ? 
                AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
@@ -1382,9 +1407,12 @@ router.delete('/batch-delete', authenticate, async (req, res) => {
         );
 
         await conn.execute(
-            `DELETE FROM tpermintaankaryawan WHERE tpk_nomor IN (${placeholders}) AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
+            `DELETE FROM hrd2.tpermintaankaryawan WHERE tpk_nomor IN (${placeholders}) AND (tpk_approveatasan IS NULL OR tpk_approveatasan = 0)`,
             tpkNomors
         );
+
+        // [BARU] Hapus shadow rows bersamaan
+        await syncDeleteRows(conn, tpkNomors);
 
         await conn.commit();
         res.json({ success: true, deleted: tpkNomors.length });

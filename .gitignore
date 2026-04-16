@@ -3,6 +3,7 @@ node_modules/
 
 reset-password-all.js
 reset-password-batch.js
+updatetbl.sql
 
 # Environment variables
 .env.local
