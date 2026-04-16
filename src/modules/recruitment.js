@@ -5,10 +5,12 @@ const router = express.Router();
 const { authenticate, isHRD, isManager } = require('../middleware/authMiddleware');
 const { addWorkdays, countWorkdays, formatDateSafe } = require('../utils/workdayCalculator');
 
+// ── update the destructure at top of file ──
 const {
     upsertRow      : syncUpsert,
     updateApproval : syncApproval,
     deleteRows     : syncDeleteRows,
+    fullSync       : syncAllIndex,   // ← ADD THIS
 } = require('../utils/tpkIndexSync');
 
 // [FIX H4] Konstanta batas panjang sla_notes — terpusat di satu tempat
@@ -73,6 +75,62 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
         return { valid: false, message: error.message };
     }
 }
+
+// ── ADD: Manual Sync state (module-level, lives in Node.js RAM) ──
+let _isSyncing    = false;
+let _lastSyncTime = 0;
+const MANUAL_SYNC_COOLDOWN_MS = 30_000; // 30 detik
+
+/**
+ * POST /api/recruitment/sync-manual
+ * Dipanggil saat user Pull-to-Refresh di Android atau klik Refresh di Web.
+ * Hanya men-sync shadow table (tpk_index_helper), BUKAN menjalankan SLA cron.
+ *
+ * Anti-spam: mutex lock + 30-detik cooldown.
+ * Meski 100 user ngeklik refresh bersamaan, DB hanya dipukul 1x per window.
+ */
+router.post('/sync-manual', authenticate, async (req, res) => {
+    const now = Date.now();
+
+    // Cooldown: belum 30 detik dari sync terakhir — skip DB, langsung OK
+    if (now - _lastSyncTime < MANUAL_SYNC_COOLDOWN_MS) {
+        return res.json({
+            success: true,
+            synced:  false,
+            message: 'Data masih segar, sinkronisasi dilewati.'
+        });
+    }
+
+    // Mutex: sudah ada sync yang sedang jalan saat ini
+    if (_isSyncing) {
+        return res.json({
+            success: true,
+            synced:  false,
+            message: 'Sinkronisasi sedang berjalan di background.'
+        });
+    }
+
+    try {
+        _isSyncing = true;
+        await syncAllIndex(db);
+        _lastSyncTime = Date.now();
+        _isSyncing    = false;
+
+        return res.json({
+            success: true,
+            synced:  true,
+            message: 'Sinkronisasi manual berhasil.'
+        });
+    } catch (error) {
+        _isSyncing = false;
+        console.error('❌ Manual sync error:', error.message);
+        return res.status(500).json({
+            success: false,
+            message: 'Gagal sinkronisasi data.',
+            error:   error.message
+        });
+    }
+});
 
 // =====================================================================
 
