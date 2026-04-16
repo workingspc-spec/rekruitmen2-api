@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+reset-password-all.js
+reset-password-batch.js
+
 # Environment variables
 .env.local
 .env.ngrok

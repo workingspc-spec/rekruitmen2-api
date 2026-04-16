@@ -520,6 +520,19 @@ router.post('/save', authenticate, async (req, res) => {
     } catch (error) {
         await connection.rollback();
         connection.release();
+
+        // --- 🟢 MULAI TAMBAHKAN BLOK INI 🟢 ---
+        // Handle race condition: jika dua request bersamaan menghasilkan
+        // nomor yang sama akibat Primary Key / UNIQUE constraint
+        if (error.code === 'ER_DUP_ENTRY') {
+            console.warn(`⚠️ [recruitment/save] Duplicate nomor detected (race condition). Error: ${error.message}`);
+            return res.status(409).json({
+                success: false,
+                message: 'Sistem sedang memproses permintaan lain. Silakan coba simpan sekali lagi dalam beberapa detik.'
+            });
+        }
+        // --- 🟢 BATAS PENAMBAHAN 🟢 ---
+
         console.error('❌ Error save:', error.message);
         res.status(500).json({ success: false, message: 'Gagal menyimpan data', error: error.message });
     }
