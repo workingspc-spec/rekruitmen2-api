@@ -175,6 +175,7 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
 /**
  * GET /api/recruitment/my-requests
  */
+// ─── my-requests ────────────────────────────────────────────────────────────
 router.get('/my-requests', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd = req.user.user_hrd;
@@ -185,6 +186,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
         const SELECT_COLS = `
             p.tpk_nomor,
             TRIM(p.tpk_peminta) as tpk_peminta,
+            COALESCE(kp.kar_nama, TRIM(p.tpk_peminta)) as peminta_nama,
             j.jab_nama,
             p.tpk_bagian,
             p.tpk_jumlah,
@@ -213,6 +215,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 SELECT ${SELECT_COLS}
                 FROM hrd2.tpermintaankaryawan p
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
                 LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 ORDER BY p.tpk_tanggal DESC
             `);
@@ -222,6 +225,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM rekruitmen2.tpk_index_helper h
                 INNER JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
                 LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 WHERE h.tpk_peminta = ?
                 ORDER BY h.tpk_tanggal DESC
@@ -241,6 +245,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
 /**
  * GET /api/recruitment/detail
  */
+// ─── detail ─────────────────────────────────────────────────────────────────
 router.get('/detail', authenticate, async (req, res) => {
     const { nomor } = req.query;
 
@@ -253,10 +258,11 @@ router.get('/detail', authenticate, async (req, res) => {
             SELECT 
                 t.tpk_nomor,
                 t.tpk_peminta,
+                COALESCE(k.kar_nama, t.tpk_peminta) as peminta_nama,
                 DATE_FORMAT(t.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
                 t.tpk_jab_kode,
                 t.tpk_bagian,
-                DATE_FORMAT(t.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
+                DATE_FORMAT(t.tpk_tgl_butuh, '%Y-%m-%dd') as tpk_tgl_butuh,
                 t.tpk_jumlah,
                 t.tpk_alasan,
                 t.tpk_alasanlain,
@@ -287,6 +293,7 @@ router.get('/detail', authenticate, async (req, res) => {
                 sla.sla_hired_count
             FROM hrd2.tpermintaankaryawan t
             JOIN hrd2.tjabatan j ON j.jab_kode = t.tpk_jab_kode
+            LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = TRIM(t.tpk_peminta)
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = t.tpk_nomor
             WHERE t.tpk_nomor = ?
         `, [nomor]);
