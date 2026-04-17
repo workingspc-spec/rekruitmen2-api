@@ -262,7 +262,7 @@ router.get('/detail', authenticate, async (req, res) => {
                 DATE_FORMAT(t.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
                 t.tpk_jab_kode,
                 t.tpk_bagian,
-                DATE_FORMAT(t.tpk_tgl_butuh, '%Y-%m-%dd') as tpk_tgl_butuh,
+                DATE_FORMAT(t.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
                 t.tpk_jumlah,
                 t.tpk_alasan,
                 t.tpk_alasanlain,
