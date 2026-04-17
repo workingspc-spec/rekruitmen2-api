@@ -24,6 +24,8 @@ const MAX_NOTES_LENGTH = 3000;
 
 /**
  * VALIDASI TANGGAL BUTUH DARI DATABASE
+ * [FIX K1] Tambahkan prefix hrd2. pada FROM tjabatan agar query tidak
+ * bergantung pada DB_NAME default (rekruitmen2) yang tidak memiliki tabel ini.
  */
 async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLeadTime = false) {
     try {
@@ -40,10 +42,11 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
             return { valid: true };
         }
 
+        // [FIX K1] hrd2.tjabatan (bukan tjabatan saja)
         const [rows] = await connection.execute(
             `SELECT COALESCE(jlt.jlt_min_days, 7) as min_days, 
                     COALESCE(jlt.jlt_is_flexible, 0) as is_flexible
-             FROM tjabatan j
+             FROM hrd2.tjabatan j
              LEFT JOIN rekruitmen2.job_lead_time_master jlt 
                 ON jlt.jlt_job_code = j.jab_kode AND jlt.jlt_active = 1
              WHERE j.jab_kode = ?`,
@@ -136,9 +139,12 @@ router.post('/sync-manual', authenticate, async (req, res) => {
 
 /**
  * GET /api/recruitment/jabatan-rules
+ * [FIX K2] Tambahkan prefix hrd2. pada FROM tjabatan agar query tidak
+ * bergantung pada DB_NAME default (rekruitmen2) yang tidak memiliki tabel ini.
  */
 router.get('/jabatan-rules', authenticate, async (req, res) => {
     try {
+        // [FIX K2] hrd2.tjabatan (bukan tjabatan saja)
         const [rows] = await db.execute(`
             SELECT 
                 j.jab_kode,
@@ -150,7 +156,7 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
                     WHEN jlt.jlt_is_flexible = 1 THEN 'Fleksibel'
                     ELSE CONCAT('Minimal ', COALESCE(jlt.jlt_min_days, 7), ' hari kerja')
                 END as label
-            FROM tjabatan j
+            FROM hrd2.tjabatan j
             LEFT JOIN rekruitmen2.job_lead_time_master jlt 
                 ON jlt.jlt_job_code = j.jab_kode AND jlt.jlt_active = 1
             ORDER BY j.jab_nama
@@ -539,8 +545,6 @@ router.post('/save', authenticate, async (req, res) => {
             const month = String(now.getMonth() + 1).padStart(2, '0');
 
             // [FIX H3] Ganti SELECT MAX + FOR UPDATE dengan sequence table atomic.
-            // INSERT ... ON DUPLICATE KEY UPDATE adalah operasi atomic di MySQL —
-            // tidak ada race condition meski ada concurrent request dari banyak user.
             await connection.execute(
                 `INSERT INTO rekruitmen2.tpk_sequence (seq_year, seq_last)
                  VALUES (?, 1)
