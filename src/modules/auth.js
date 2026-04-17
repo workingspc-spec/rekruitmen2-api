@@ -39,8 +39,8 @@ function getTokenExpiryMs(tokenExpiry) {
 function setAuthCookie(res, token, tokenExpiry) {
     res.cookie('token', token, {
         httpOnly: true,
-        secure:   isProduction,
-        sameSite: isProduction ? 'strict' : 'lax',
+        secure:   false, // UBAH SEMENTARA JADI FALSE SAMPAI PAKAI HTTPS
+        sameSite: 'lax', // UBAH JADI 'lax' AGAR LEBIH AMAN DI HTTP
         maxAge:   getTokenExpiryMs(tokenExpiry),
         path:     '/',
     });
@@ -135,8 +135,8 @@ router.post('/login', loginLimiter, async (req, res) => {
 router.post('/logout', (req, res) => {
     res.clearCookie('token', {
         httpOnly: true,
-        secure:   isProduction,
-        sameSite: isProduction ? 'strict' : 'lax',
+        secure:   false, // SESUAIKAN DENGAN YANG DI ATAS
+        sameSite: 'lax', // SESUAIKAN DENGAN YANG DI ATAS
         path:     '/',
     });
     res.json({ success: true, message: 'Logout berhasil' });
