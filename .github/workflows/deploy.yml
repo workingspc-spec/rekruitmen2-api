@@ -1,0 +1,33 @@
+name: Deploy Backend ke VPS
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            echo "=== Masuk ke folder backend ==="
+            cd ${{ secrets.VPS_BACKEND_PATH }}
+            
+            echo "=== Tarik kode terbaru ==="
+            git pull origin main
+            
+            echo "=== Install dependency baru ==="
+            npm install 
+            
+            echo "=== Restart PM2 (sesuai nama di ecosystem.config.js) ==="
+            pm2 restart rekruitmen2-api
+            
+            echo "=== Status PM2 ==="
+            pm2 status rekruitmen2-api
+            
+            echo "=== Deploy selesai! ==="

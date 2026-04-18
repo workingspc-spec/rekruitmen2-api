@@ -73,6 +73,40 @@ app.use(cors({
     credentials: true,
 }));
 
+// ================= CSRF PROTECTION (tambahkan setelah blok CORS) =================
+// Melindungi endpoint cookie-based (web) dari cross-site request forgery.
+// Android menggunakan Bearer token → tidak terdampak, dilewati otomatis.
+app.use((req, res, next) => {
+    // Metode safe (tidak mengubah state) → lewati
+    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+
+    // Bearer token (Android/API client) → bukan serangan CSRF, lewati
+    if (req.headers.authorization?.startsWith('Bearer ')) return next();
+
+    // Untuk cookie-based auth (web), verifikasi dua lapis:
+
+    // Lapis 1: Origin header harus cocok dengan CORS_ORIGINS
+    const origin = req.headers.origin;
+    if (origin) {
+        const isAllowed = allowedOrigins.some(o => origin === o || origin.startsWith(o));
+        if (!isAllowed) {
+            console.warn(`⛔ CSRF blocked (origin): ${origin}`);
+            return res.status(403).json({ success: false, message: 'Forbidden: invalid origin' });
+        }
+    }
+
+    // Lapis 2: Header kustom yang tidak bisa di-set oleh cross-site script
+    // (CORS pre-flight memblokir custom header dari origin tidak terdaftar)
+    const xrw = req.headers['x-requested-with'];
+    if (!xrw && req.cookies?.token) {
+        // Ada cookie tapi tidak ada header custom → kemungkinan CSRF attempt
+        console.warn(`⛔ CSRF blocked (missing X-Requested-With): path=${req.path}`);
+        return res.status(403).json({ success: false, message: 'Forbidden: missing request header' });
+    }
+
+    next();
+});
+
 // ================= SECURITY =================
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false, limit: '1mb' }));
@@ -108,6 +142,7 @@ const { authenticate } = require('./src/middleware/authMiddleware');
 // ================= ROUTES =================
 app.get('/', (_, res) => res.send('Backend Rekruitmen is Running! 🚀'));
 
+app.use('/api/app-version', require('./src/modules/appVersion'));
 app.use('/api/auth',        require('./src/modules/auth'));
 app.use('/api/master',      authenticate, require('./src/modules/masterData'));
 app.use('/api/recruitment', authenticate, require('./src/modules/recruitment'));
