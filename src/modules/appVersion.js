@@ -25,11 +25,11 @@ router.get('/latest', async (req, res) => {
 
     try {
         const [rows] = await db.execute(
-            `SELECT version_code, version_name, is_mandatory, download_url, release_notes
-             FROM rekruitmen2.t_app_version
-             WHERE app_id = ?
-             ORDER BY version_code DESC
-             LIMIT 1`,
+            `SELECT version_code, version_name, is_mandatory, download_url, sha256, release_notes
+            FROM rekruitmen2.t_app_version
+            WHERE app_id = ?
+            ORDER BY version_code DESC
+            LIMIT 1`,
             [app_id]
         );
 
@@ -49,10 +49,11 @@ router.get('/latest', async (req, res) => {
                 versionName:  latest.version_name,
                 isMandatory:  latest.is_mandatory === 1,
                 downloadUrl:  latest.download_url,
-                releaseNotes: latest.release_notes
+                releaseNotes: latest.release_notes,
+                sha256:       latest.sha256 || null    // ← TAMBAH INI
             }
         });
-
+        
     } catch (error) {
         console.error('❌ Error app-version:', error.message);
         res.status(500).json({ success: false, message: error.message });
