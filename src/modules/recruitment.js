@@ -640,11 +640,34 @@ router.post('/save', authenticate, async (req, res) => {
         connection.release();
 
         if (error.code === 'ER_DUP_ENTRY') {
-            console.warn(`⚠️ [recruitment/save] Duplicate nomor detected. Error: ${error.message}`);
-            return res.status(409).json({
-                success: false,
-                message: 'Sistem sedang memproses permintaan lain. Silakan coba simpan sekali lagi dalam beberapa detik.'
-            });
+            console.warn(`⚠️ [recruitment/save] Duplicate nomor detected. Menjalankan auto-sync...`);
+            
+            // Auto-heal: Langsung sinkronkan sequence saat terjadi tabrakan
+            try {
+                await db.execute(`
+                    INSERT INTO rekruitmen2.tpk_sequence (seq_year, seq_last)
+                    SELECT 
+                        YEAR(tpk_tanggal) AS seq_year,
+                        MAX(CAST(SUBSTRING_INDEX(tpk_nomor, '/', 1) AS UNSIGNED)) AS seq_last
+                    FROM hrd2.tpermintaankaryawan
+                    WHERE YEAR(tpk_tanggal) >= YEAR(CURDATE()) - 1
+                    GROUP BY YEAR(tpk_tanggal)
+                    ON DUPLICATE KEY UPDATE 
+                        seq_last = GREATEST(seq_last, VALUES(seq_last))
+                `);
+                
+                return res.status(409).json({
+                    success: false,
+                    // Pesan yang lebih informatif tanpa menyuruh menunggu lama
+                    message: 'Terjadi sinkronisasi nomor dengan sistem lama. Sistem telah otomatis memperbaikinya, silakan klik Simpan sekali lagi.'
+                });
+            } catch (syncErr) {
+                console.error('❌ [recruitment/save] Auto-sync sequence gagal:', syncErr.message);
+                return res.status(409).json({
+                    success: false,
+                    message: 'Sinkronisasi data sedang berjalan. Silakan tunggu maksimal 5 menit, lalu coba simpan kembali.'
+                });
+            }
         }
 
         console.error('❌ Error save:', error.message);

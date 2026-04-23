@@ -108,6 +108,24 @@ const runSlaSync = async () => {
     } catch (syncErr) {
         console.warn('[tpkIndexSync] Periodic sync error (non-fatal):', syncErr.message);
     }
+
+    try {
+        // Menggunakan db.execute agar tidak mengganggu connection pool dari transaksi SLA di atas
+        await db.execute(`
+            INSERT INTO rekruitmen2.tpk_sequence (seq_year, seq_last)
+            SELECT 
+                YEAR(tpk_tanggal) AS seq_year,
+                MAX(CAST(SUBSTRING_INDEX(tpk_nomor, '/', 1) AS UNSIGNED)) AS seq_last
+            FROM hrd2.tpermintaankaryawan
+            WHERE YEAR(tpk_tanggal) >= YEAR(CURDATE()) - 1
+            GROUP BY YEAR(tpk_tanggal)
+            ON DUPLICATE KEY UPDATE 
+                seq_last = GREATEST(seq_last, VALUES(seq_last))
+        `);
+        // console.log('[slaCron] tpk_sequence synced.'); // Opsional: bisa di-comment agar log tidak terlalu berisik
+    } catch (sequenceErr) {
+        console.warn('[slaCron] Sequence sync failed (non-fatal):', sequenceErr.message);
+    }
 };
 
 cron.schedule('*/5 * * * *', runSlaSync);
