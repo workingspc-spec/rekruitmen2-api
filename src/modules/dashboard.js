@@ -193,8 +193,16 @@ router.get('/recent-activities', authenticate, async (req, res) => {
     try {
         let activities = [];
 
+        // Buat sub-query gabungan (Draft + Live) agar mudah di-join
+        const combinedTpkQuery = `
+            SELECT tpk_nomor, tpk_peminta, tpk_tanggal, tpk_approveHRD, tpk_approveatasan 
+            FROM rekruitmen2.tpermintaan_draft
+            UNION ALL
+            SELECT tpk_nomor, tpk_peminta, tpk_tanggal, tpk_approveHRD, tpk_approveatasan 
+            FROM hrd2.tpermintaankaryawan
+        `;
+
         if (is_hrd) {
-            // HRD: semua aktivitas — tidak ada filter tpk_peminta
             const [recentRequests] = await db.execute(`
                 SELECT 
                     'request' as type,
@@ -208,14 +216,13 @@ router.get('/recent-activities', authenticate, async (req, res) => {
                         WHEN p.tpk_approveatasan = 2 THEN 'rejected_manager'
                         ELSE 'created'
                     END as action
-                FROM hrd2.tpermintaankaryawan p
+                FROM (${combinedTpkQuery}) p
                 LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
                 ORDER BY p.tpk_tanggal DESC
                 LIMIT ?
             `, [limit]);
             activities = recentRequests;
         } else {
-            // [OPTIMASI] Non-HRD: gunakan shadow table index pada tpk_peminta
             const [myActivities] = await db.execute(`
                 SELECT 
                     'my_request' as type,
@@ -229,7 +236,7 @@ router.get('/recent-activities', authenticate, async (req, res) => {
                         ELSE 'pending'
                     END as action
                 FROM rekruitmen2.tpk_index_helper h
-                INNER JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
+                INNER JOIN (${combinedTpkQuery}) p ON p.tpk_nomor = h.tpk_nomor
                 WHERE h.tpk_peminta = ?
                 ORDER BY h.tpk_tanggal DESC
                 LIMIT ?
