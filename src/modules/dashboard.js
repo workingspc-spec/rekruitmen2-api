@@ -68,77 +68,71 @@ router.get('/stats', authenticate, async (req, res) => {
     const is_hrd = req.user.user_hrd;
     const { period = 'All Time' } = req.query;
 
-    // Filter tanggal untuk shadow table
-    const dateFilter = getDateFilter(period);
-    const dateWhere  = dateFilter.sql ? ` AND ${dateFilter.sql}` : '';
-
     try {
-        // ── 1. TOTAL PERMINTAAN ──────────────────────────────────────────────
-        // [OPTIMASI] Filter via shadow table: idx_helper_peminta + idx_helper_tanggal
+        // ── 1. TOTAL PERMINTAAN (FIX: Hanya hitung data dari aplikasi baru) ──
+        const dateFilter = getDateFilter(period, 'h.tpk_tanggal');
+        const dateWhere  = dateFilter.sql ? ` AND ${dateFilter.sql}` : '';
         let permintaanCount;
+
+        // [FIX] INNER JOIN t_recruitment_sla memastikan data legacy murni terbuang
+        const basePermintaanQuery = `
+            FROM rekruitmen2.tpk_index_helper h
+            INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
+            WHERE 1=1 ${dateWhere}
+        `;
+
         if (is_hrd) {
-            // HRD: semua permintaan, filter tanggal dari shadow table
-            const [rows] = await db.execute(
-                `SELECT COUNT(*) as total
-                 FROM rekruitmen2.tpk_index_helper h
-                 WHERE 1=1 ${dateWhere}`,
-                dateFilter.params
-            );
+            const [rows] = await db.execute(`SELECT COUNT(*) as total ${basePermintaanQuery}`, dateFilter.params);
             permintaanCount = rows[0].total;
         } else {
-            // Non-HRD: filter peminta + tanggal (idx_helper_peminta_tanggal)
-            const [rows] = await db.execute(
-                `SELECT COUNT(*) as total
-                 FROM rekruitmen2.tpk_index_helper h
-                 WHERE h.tpk_peminta = ? ${dateWhere}`,
-                [user_kode, ...dateFilter.params]
-            );
+            const [rows] = await db.execute(`SELECT COUNT(*) as total ${basePermintaanQuery} AND h.tpk_peminta = ?`, [...dateFilter.params, user_kode]);
             permintaanCount = rows[0].total;
         }
 
-        // ── 2. LOWONGAN AKTIF (approved HRD fully) ──────────────────────────
-        // [OPTIMASI] Filter via shadow table: idx_helper_approval + idx_helper_tanggal
-        const lowonganFilter = getDateFilter(period);
+
+        // ── 2. LOWONGAN AKTIF (FIX: Hanya hitung data dari aplikasi baru) ──
+        const lowonganFilter = getDateFilter(period, 'h.tpk_tanggal');
         const lowonganWhere  = lowonganFilter.sql ? ` AND ${lowonganFilter.sql}` : '';
         const [lowongan] = await db.execute(
             `SELECT COUNT(*) as total
              FROM rekruitmen2.tpk_index_helper h
+             INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
              WHERE h.tpk_approveHRD = 1 ${lowonganWhere}`,
             lowonganFilter.params
         );
 
-        // ── 3. PENDING APPROVAL ──────────────────────────────────────────────
-        // [OPTIMASI] Filter via shadow table: idx_helper_approval
+
+        // ── 3. PENDING APPROVAL (FIX: Tembak langsung ke DRAFT_TABLE) ──
         let pendingApproval = 0;
         if (is_hrd) {
-            // STATUS BAYANGAN: HRD menunggu tpk_approveatasan = 9
-            const approvalFilter = getDateFilter(period);
+            // [FIX] Samakan WHERE clause dengan recruitment.js -> IN (1, 9)
+            const approvalFilter = getDateFilter(period, 'p.tpk_tanggal');
             const approvalWhere  = approvalFilter.sql ? ` AND ${approvalFilter.sql}` : '';
             const [hrdApprovals] = await db.execute(
                 `SELECT COUNT(*) as total
-                 FROM rekruitmen2.tpk_index_helper h
-                 WHERE h.tpk_approveatasan = 9 AND h.tpk_approveHRD = 0 ${approvalWhere}`,
+                 FROM rekruitmen2.tpermintaan_draft p
+                 WHERE p.tpk_approveatasan IN (1, 9) AND p.tpk_approveHRD = 0 ${approvalWhere}`,
                 approvalFilter.params
             );
             pendingApproval = hrdApprovals[0].total;
         } else {
-            // Non-HRD: bawahan yang belum diapprove atasan — masih perlu join tkaryawan
-            // untuk mendapatkan daftar bawahan (kar_nik_atasan tidak ada di shadow table)
-            const approvalFilter = getDateFilter(period, 'h.tpk_tanggal');
+            // [FIX] Samakan WHERE clause dengan recruitment.js -> join tkaryawan, ke draft table
+            const approvalFilter = getDateFilter(period, 'p.tpk_tanggal');
             const approvalWhere  = approvalFilter.sql ? ` AND ${approvalFilter.sql}` : '';
             const [approvals] = await db.execute(
                 `SELECT COUNT(*) as total
-                 FROM rekruitmen2.tpk_index_helper h
-                 INNER JOIN hrd2.tkaryawan k ON k.kar_nik = h.tpk_peminta
+                 FROM rekruitmen2.tpermintaan_draft p
+                 INNER JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
                  WHERE k.kar_nik_atasan = ?
-                   AND h.tpk_approveatasan = 0
+                   AND p.tpk_approveatasan = 0
                    ${approvalWhere}`,
                 [user_kode, ...approvalFilter.params]
             );
             pendingApproval = approvals[0].total;
         }
 
-        // ── 4. SLA SUMMARY (khusus HRD) ──────────────────────────────────────
+
+        // ── 4. SLA SUMMARY (Tidak ada masalah di sini) ──
         let slaStats = null;
         if (is_hrd) {
             const [sla] = await db.execute(`
