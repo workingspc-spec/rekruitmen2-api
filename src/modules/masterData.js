@@ -311,6 +311,35 @@ router.delete('/bypass-users/:nik', isHRD, async (req, res) => {
     }
 });
 
+/**
+ * GET /api/master/karyawan/:nik
+ * HRD only — verifikasi NIK dan ambil data karyawan
+ */
+router.get('/karyawan/:nik', isHRD, async (req, res) => {
+    const { nik } = req.params;
+    if (!nik || !nik.trim()) {
+        return res.status(400).json({ success: false, message: 'NIK wajib diisi' });
+    }
+    try {
+        const [rows] = await db.execute(
+            `SELECT k.kar_Nik, k.kar_nama, k.kar_bagian, j.jab_nama
+             FROM hrd2.tkaryawan k
+             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = k.kar_jab_kode
+             WHERE k.kar_Nik = ?`,
+            [nik.trim()]
+        );
+        if (rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: `NIK ${nik} tidak ditemukan di data karyawan`
+            });
+        }
+        res.json({ success: true, data: rows[0] });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 // ── LAINNYA ───────────────────────────────────────────────────────────────────
 
 // GET /api/master/cari-jabatan
