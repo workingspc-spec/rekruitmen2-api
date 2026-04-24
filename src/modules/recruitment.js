@@ -139,6 +139,8 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
 
 // ── GET my-requests ──────────────────────────────────────────────────────────
 // Gabungkan DRAFT (belum HRD approve) + LIVE (sudah HRD approve)
+// ── GET my-requests ──────────────────────────────────────────────────────────
+// Gabungkan DRAFT (belum HRD approve) + LIVE (sudah HRD approve)
 router.get('/my-requests', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd    = req.user.user_hrd;
@@ -180,7 +182,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM ${DRAFT_TABLE} p
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
                 ORDER BY p.tpk_tanggal DESC
             `);
             const [liveRows] = await db.execute(`
@@ -188,7 +190,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM ${LIVE_TABLE} p
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
                 ORDER BY p.tpk_tanggal DESC
             `);
             rows = [...draftRows, ...liveRows];
@@ -199,7 +201,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM ${DRAFT_TABLE} p
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
                 WHERE TRIM(p.tpk_peminta) = ?
                 ORDER BY p.tpk_tanggal DESC
             `, [user_kode]);
@@ -209,7 +211,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 INNER JOIN ${LIVE_TABLE} p ON p.tpk_nomor = h.tpk_nomor
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
                 WHERE h.tpk_peminta = ?
                 ORDER BY h.tpk_tanggal DESC
             `, [user_kode]);
