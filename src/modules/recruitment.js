@@ -483,6 +483,16 @@ router.post('/save', authenticate, async (req, res) => {
         );
         const newNomor = `${String(seq).padStart(3, '0')}/HRD/PKAR/${month}/${year}`;
 
+        // ── [BYPASS CHECK] Cek apakah peminta terdaftar sebagai bypass user ──
+        // Jika ya → tpk_approveatasan = 9 (langsung antri HRD, skip atasan)
+        // Tabel t_bypass_users ada di rekruitmen2, tidak menyentuh hrd2 sama sekali.
+        const [bypassRows] = await connection.execute(
+            `SELECT bu_nik FROM rekruitmen2.t_bypass_users WHERE bu_nik = ? AND bu_active = 1`,
+            [user_kode]
+        );
+        const isBypass = bypassRows.length > 0;
+        const initialApproveAtasan = isBypass ? 9 : 0;
+
         // ✅ INSERT ke DRAFT — bukan ke hrd2!
         await connection.execute(`
             INSERT INTO ${DRAFT_TABLE} (
@@ -504,7 +514,7 @@ router.post('/save', authenticate, async (req, res) => {
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?,
-                0, 0
+                ?, 0
             )
         `, [
             newNomor, user_kode, jab_kode, bagian,
@@ -514,25 +524,30 @@ router.post('/save', authenticate, async (req, res) => {
             tpk_keterangan9||'', tpk_keterangan10||'',
             tpk_spesifikasi||'',  tpk_spesifikasi2||'',  tpk_spesifikasi3||'',  tpk_spesifikasi4||'',
             tpk_spesifikasi5||'', tpk_spesifikasi6||'',  tpk_spesifikasi7||'',  tpk_spesifikasi8||'',
-            tpk_spesifikasi9||'', tpk_spesifikasi10||''
+            tpk_spesifikasi9||'', tpk_spesifikasi10||'',
+            initialApproveAtasan   // ← bypass = 9, normal = 0
         ]);
 
         await syncUpsert(connection, {
             tpk_nomor: newNomor, tpk_peminta: user_kode,
-            tpk_approveatasan: 0, tpk_approveHRD: 0,
+            tpk_approveatasan: initialApproveAtasan, tpk_approveHRD: 0,
             tpk_tanggal: new Date().toISOString().split('T')[0],
         });
 
+        const bypassNote = isBypass
+            ? '\n[AUTO] Peminta terdaftar bypass — langsung antri HRD tanpa persetujuan atasan.'
+            : '';
+
         const [slaResult] = await connection.execute(
             `INSERT INTO rekruitmen2.t_recruitment_sla
-                (sla_tpk_nomor, sla_job_code, sla_original_requested_date, sla_system_ceiling_date, sla_request_created_at, sla_status)
-             VALUES (?, ?, ?, ?, NOW(), 'PENDING')`,
-            [newNomor, jab_kode, tgl_butuh, tgl_butuh]
+                (sla_tpk_nomor, sla_job_code, sla_original_requested_date, sla_system_ceiling_date, sla_request_created_at, sla_status, sla_notes)
+             VALUES (?, ?, ?, ?, NOW(), 'PENDING', ?)`,
+            [newNomor, jab_kode, tgl_butuh, tgl_butuh, bypassNote || null]
         );
         await connection.execute(
             `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, user_kode, field_name, old_value, new_value)
-             VALUES (?, ?, ?, 'created', NULL, 'NEW_REQUEST')`,
-            [newNomor, slaResult.insertId, user_kode]
+             VALUES (?, ?, ?, 'created', NULL, ?)`,
+            [newNomor, slaResult.insertId, user_kode, isBypass ? 'NEW_REQUEST (BYPASS)' : 'NEW_REQUEST']
         );
 
         await connection.commit();
