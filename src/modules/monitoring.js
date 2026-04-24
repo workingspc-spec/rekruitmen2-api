@@ -268,7 +268,11 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
     try {
         const [authCheck] = await db.execute(
             `SELECT p.tpk_peminta, k.kar_nik_atasan
-             FROM hrd2.tpermintaankaryawan p
+             FROM (
+                 SELECT tpk_nomor, tpk_peminta FROM rekruitmen2.tpermintaan_draft
+                 UNION ALL
+                 SELECT tpk_nomor, tpk_peminta FROM hrd2.tpermintaankaryawan
+             ) p
              LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
              WHERE p.tpk_nomor = ?`,
             [tpk_nomor]
@@ -371,7 +375,11 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
     try {
         const [authCheck] = await db.execute(
             `SELECT p.tpk_peminta, k.kar_nik_atasan
-             FROM hrd2.tpermintaankaryawan p
+             FROM (
+                 SELECT tpk_nomor, tpk_peminta FROM rekruitmen2.tpermintaan_draft
+                 UNION ALL
+                 SELECT tpk_nomor, tpk_peminta FROM hrd2.tpermintaankaryawan
+             ) p
              LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
              WHERE p.tpk_nomor = ?`,
             [tpk_nomor]
