@@ -2,7 +2,6 @@ const cron = require('node-cron');
 const db   = require('../config/db');
 const { fullSync: syncIndexHelper } = require('./tpkIndexSync');
 
-// [FIX H4] Batas maksimal panjang sla_notes agar tidak tumbuh tanpa batas
 const MAX_NOTES_LENGTH = 3000;
 
 const runSlaSync = async () => {
@@ -11,6 +10,7 @@ const runSlaSync = async () => {
         connection = await db.getConnection();
         await connection.beginTransaction();
 
+        // SLA hanya ada untuk yang sudah HRD approve (ada di hrd2), jadi ini tetap sama
         const [activeSlas] = await connection.query(
             `SELECT sla_tpk_nomor FROM rekruitmen2.t_recruitment_sla WHERE sla_status IN ('PENDING', 'CALCULATED')`
         );
@@ -19,7 +19,6 @@ const runSlaSync = async () => {
             const tpkNomors    = activeSlas.map(s => s.sla_tpk_nomor);
             const placeholders = tpkNomors.map(() => '?').join(',');
 
-            // [FIX M6] Tambahkan prefix hrd2. agar tidak bergantung pada DB_NAME default
             const [hiredData] = await connection.query(`
                 SELECT 
                     rpk_tpk_nomor AS tlp_tpk_nomor, 
@@ -59,7 +58,6 @@ const runSlaSync = async () => {
                 const tpksToClose       = toComplete.map(row => row.sla_tpk_nomor);
                 const placeholdersClose = tpksToClose.map(() => '?').join(',');
 
-                // [FIX H4] LEFT(..., MAX_NOTES_LENGTH) agar sla_notes tidak overflow
                 await connection.query(`
                     UPDATE rekruitmen2.t_recruitment_sla 
                     SET 
@@ -109,20 +107,24 @@ const runSlaSync = async () => {
         console.warn('[tpkIndexSync] Periodic sync error (non-fatal):', syncErr.message);
     }
 
+    // [FIX] Sequence sync harus baca dari DRAFT + hrd2 agar nomor draft tidak
+    // di-reuse oleh request baru sebelum HRD approve memindahkan ke hrd2
     try {
-        // Menggunakan db.execute agar tidak mengganggu connection pool dari transaksi SLA di atas
         await db.execute(`
             INSERT INTO rekruitmen2.tpk_sequence (seq_year, seq_last)
             SELECT 
                 YEAR(tpk_tanggal) AS seq_year,
                 MAX(CAST(SUBSTRING_INDEX(tpk_nomor, '/', 1) AS UNSIGNED)) AS seq_last
-            FROM hrd2.tpermintaankaryawan
+            FROM (
+                SELECT tpk_nomor, tpk_tanggal FROM rekruitmen2.tpermintaan_draft
+                UNION ALL
+                SELECT tpk_nomor, tpk_tanggal FROM hrd2.tpermintaankaryawan
+            ) AS combined
             WHERE YEAR(tpk_tanggal) >= YEAR(CURDATE()) - 1
             GROUP BY YEAR(tpk_tanggal)
             ON DUPLICATE KEY UPDATE 
                 seq_last = GREATEST(seq_last, VALUES(seq_last))
         `);
-        // console.log('[slaCron] tpk_sequence synced.'); // Opsional: bisa di-comment agar log tidak terlalu berisik
     } catch (sequenceErr) {
         console.warn('[slaCron] Sequence sync failed (non-fatal):', sequenceErr.message);
     }

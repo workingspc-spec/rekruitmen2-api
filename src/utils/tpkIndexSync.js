@@ -122,33 +122,37 @@ async function deleteRows(conn, tpkNomors) {
 async function fullSync(db) {
     const start = Date.now();
 
+    // Gabungkan draft + live untuk shadow index PKAR
     const [rows] = await db.execute(`
         SELECT
             tpk_nomor,
-            TRIM(tpk_peminta)                AS tpk_peminta,
-            COALESCE(tpk_approveatasan, 0)   AS tpk_approveatasan,
-            COALESCE(tpk_approveHRD,   0)    AS tpk_approveHRD,
-            DATE(tpk_tanggal)                AS tpk_tanggal
+            TRIM(tpk_peminta)              AS tpk_peminta,
+            COALESCE(tpk_approveatasan, 0) AS tpk_approveatasan,
+            COALESCE(tpk_approveHRD,   0) AS tpk_approveHRD,
+            DATE(tpk_tanggal)              AS tpk_tanggal
+        FROM rekruitmen2.tpermintaan_draft
+
+        UNION ALL
+
+        SELECT
+            tpk_nomor,
+            TRIM(tpk_peminta)              AS tpk_peminta,
+            COALESCE(tpk_approveatasan, 0) AS tpk_approveatasan,
+            COALESCE(tpk_approveHRD,   0) AS tpk_approveHRD,
+            DATE(tpk_tanggal)              AS tpk_tanggal
         FROM hrd2.tpermintaankaryawan
     `);
 
-    if (!rows.length) {
-        console.log('[tpkIndexSync] fullSync: tidak ada data untuk di-sync.');
-        return;
-    }
+    if (!rows.length) return;
 
     const CHUNK = 500;
     for (let i = 0; i < rows.length; i += CHUNK) {
-        const chunk       = rows.slice(i, i + CHUNK);
+        const chunk        = rows.slice(i, i + CHUNK);
         const placeholders = chunk.map(() => '(?,?,?,?,?)').join(',');
         const values = chunk.flatMap(r => [
-            r.tpk_nomor,
-            r.tpk_peminta,
-            r.tpk_approveatasan,
-            r.tpk_approveHRD,
-            r.tpk_tanggal,
+            r.tpk_nomor, r.tpk_peminta,
+            r.tpk_approveatasan, r.tpk_approveHRD, r.tpk_tanggal,
         ]);
-
         await db.execute(`
             INSERT INTO rekruitmen2.tpk_index_helper
                 (tpk_nomor, tpk_peminta, tpk_approveatasan, tpk_approveHRD, tpk_tanggal)
