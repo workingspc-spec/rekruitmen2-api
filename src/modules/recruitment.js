@@ -152,7 +152,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
             p.tpk_nomor,
             TRIM(p.tpk_peminta) as tpk_peminta,
             COALESCE(kp.kar_nama, TRIM(p.tpk_peminta)) as peminta_nama,
-            j.jab_nama,
+            COALESCE(j.jab_nama, p.tpk_jab_kode, 'Jabatan Dihapus') as jab_nama,
             p.tpk_bagian,
             p.tpk_jumlah,
             COALESCE(p.tpk_approveatasan, 0) as tpk_approveatasan,
@@ -191,9 +191,10 @@ router.get('/my-requests', authenticate, async (req, res) => {
             const [liveRows] = await db.execute(`
                 SELECT ${SELECT_COLS}
                 FROM ${LIVE_TABLE} p
-                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                /* 👇 UBAH INNER JOIN MENJADI LEFT JOIN 👇 */
+                LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 👈 GANTI KE LEFT JOIN
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 ORDER BY p.tpk_tanggal DESC
             `);
             rows = [...draftRows, ...liveRows];
@@ -208,12 +209,11 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 WHERE TRIM(p.tpk_peminta) = ?
                 ORDER BY p.tpk_tanggal DESC
             `, [user_kode]);
-            // Ganti INNER JOIN menjadi LEFT JOIN di liveRows non-HRD:
-// Ganti INNER JOIN menjadi LEFT JOIN dan BYPASS tpk_index_helper:
             const [liveRows] = await db.execute(`
                 SELECT ${SELECT_COLS}
                 FROM ${LIVE_TABLE} p
-                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                /* 👇 UBAH INNER JOIN MENJADI LEFT JOIN 👇 */
+                LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
                 LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 WHERE TRIM(p.tpk_peminta) = ?
