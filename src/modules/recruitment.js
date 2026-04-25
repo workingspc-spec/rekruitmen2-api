@@ -171,8 +171,9 @@ router.get('/my-requests', authenticate, async (req, res) => {
             COALESCE(sla.sla_hired_count, 0) as hired_count,
             sla.sla_final_target_date,
             sla.sla_source,
-            COALESCE(sla.sla_status, 'PENDING') as sla_status,
-            COALESCE(sla.sla_is_editable, 0) as sla_is_editable
+            COALESCE(sla.sla_status, 'LEGACY') as sla_status,
+            COALESCE(sla.sla_is_editable, 0) as sla_is_editable,
+            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
         `;
 
         let rows = [];
@@ -192,7 +193,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM ${LIVE_TABLE} p
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 ORDER BY p.tpk_tanggal DESC
             `);
             rows = [...draftRows, ...liveRows];
@@ -207,13 +208,14 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 WHERE TRIM(p.tpk_peminta) = ?
                 ORDER BY p.tpk_tanggal DESC
             `, [user_kode]);
+            // Ganti INNER JOIN menjadi LEFT JOIN di liveRows non-HRD:
             const [liveRows] = await db.execute(`
                 SELECT ${SELECT_COLS}
                 FROM rekruitmen2.tpk_index_helper h
                 INNER JOIN ${LIVE_TABLE} p ON p.tpk_nomor = h.tpk_nomor
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 WHERE h.tpk_peminta = ?
                 ORDER BY h.tpk_tanggal DESC
             `, [user_kode]);
@@ -754,14 +756,14 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
         `);
 
         // Ambil dari LIVE (Untuk yang sudah Approved)
+        // Ambil dari LIVE — INNER JOIN memastikan data legacy (tanpa SLA) tidak muncul
         const [liveRows] = await db.execute(`
             SELECT ${SELECT_COLS} FROM ${LIVE_TABLE} p
             INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+            INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE 1=1 ${liveFilter}
         `);
-
         // Gabungkan dan urutkan
         const rows = [...draftRows, ...liveRows];
         rows.sort((a, b) => new Date(b.tpk_tanggal) - new Date(a.tpk_tanggal));

@@ -69,24 +69,51 @@ router.get('/stats', authenticate, async (req, res) => {
     const { period = 'All Time' } = req.query;
 
     try {
-        // ── 1. TOTAL PERMINTAAN (FIX: Hanya hitung data dari aplikasi baru) ──
+        // ── 1. TOTAL PERMINTAAN (GABUNGAN NEW + LEGACY) ──
         const dateFilter = getDateFilter(period, 'h.tpk_tanggal');
         const dateWhere  = dateFilter.sql ? ` AND ${dateFilter.sql}` : '';
-        let permintaanCount;
 
-        // [FIX] INNER JOIN t_recruitment_sla memastikan data legacy murni terbuang
-        const basePermintaanQuery = `
-            FROM rekruitmen2.tpk_index_helper h
-            INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
-            WHERE 1=1 ${dateWhere}
-        `;
-
+        // PKAR Baru: ada record di t_recruitment_sla
+        let pkarCount;
         if (is_hrd) {
-            const [rows] = await db.execute(`SELECT COUNT(*) as total ${basePermintaanQuery}`, dateFilter.params);
-            permintaanCount = rows[0].total;
+            const [rows] = await db.execute(
+                `SELECT COUNT(*) as total FROM rekruitmen2.tpk_index_helper h
+                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
+                WHERE 1=1 ${dateWhere}`,
+                dateFilter.params
+            );
+            pkarCount = rows[0].total;
         } else {
-            const [rows] = await db.execute(`SELECT COUNT(*) as total ${basePermintaanQuery} AND h.tpk_peminta = ?`, [...dateFilter.params, user_kode]);
-            permintaanCount = rows[0].total;
+            const [rows] = await db.execute(
+                `SELECT COUNT(*) as total FROM rekruitmen2.tpk_index_helper h
+                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
+                WHERE 1=1 ${dateWhere} AND h.tpk_peminta = ?`,
+                [...dateFilter.params, user_kode]
+            );
+            pkarCount = rows[0].total;
+        }
+
+        // Legacy: hrd2 yang TIDAK punya SLA (data dari sistem lama)
+        const legacyDateFilter = getDateFilter(period, 'p.tpk_tanggal');
+        const legacyDateWhere  = legacyDateFilter.sql ? ` AND ${legacyDateFilter.sql}` : '';
+
+        let legacyCount;
+        if (is_hrd) {
+            const [rows] = await db.execute(
+                `SELECT COUNT(*) as total FROM hrd2.tpermintaankaryawan p
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                WHERE sla.sla_id IS NULL ${legacyDateWhere}`,
+                legacyDateFilter.params
+            );
+            legacyCount = rows[0].total;
+        } else {
+            const [rows] = await db.execute(
+                `SELECT COUNT(*) as total FROM hrd2.tpermintaankaryawan p
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                WHERE sla.sla_id IS NULL AND TRIM(p.tpk_peminta) = ? ${legacyDateWhere}`,
+                [user_kode, ...legacyDateFilter.params]
+            );
+            legacyCount = rows[0].total;
         }
 
 
@@ -150,7 +177,9 @@ router.get('/stats', authenticate, async (req, res) => {
         res.json({
             success: true,
             data: {
-                totalPermintaan: Number(permintaanCount || 0),
+                totalPermintaan: Number(pkarCount) + Number(legacyCount),
+                pkarCount:       Number(pkarCount),
+                legacyCount:     Number(legacyCount),
                 lowonganAktif:   Number(lowongan[0].total || 0),
                 pendingApproval: Number(pendingApproval || 0),
 
