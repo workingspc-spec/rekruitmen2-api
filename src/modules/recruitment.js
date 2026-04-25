@@ -193,7 +193,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM ${LIVE_TABLE} p
                 INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 👈 GANTI KE LEFT JOIN
                 ORDER BY p.tpk_tanggal DESC
             `);
             rows = [...draftRows, ...liveRows];
@@ -209,16 +209,16 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 ORDER BY p.tpk_tanggal DESC
             `, [user_kode]);
             // Ganti INNER JOIN menjadi LEFT JOIN di liveRows non-HRD:
-            const [liveRows] = await db.execute(`
-                SELECT ${SELECT_COLS}
-                FROM rekruitmen2.tpk_index_helper h
-                INNER JOIN ${LIVE_TABLE} p ON p.tpk_nomor = h.tpk_nomor
-                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
-                LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-                WHERE h.tpk_peminta = ?
-                ORDER BY h.tpk_tanggal DESC
-            `, [user_kode]);
+        const [liveRows] = await db.execute(`
+            SELECT ${SELECT_COLS}
+            FROM rekruitmen2.tpk_index_helper h
+            INNER JOIN ${LIVE_TABLE} p ON p.tpk_nomor = h.tpk_nomor
+            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
+            LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 👈 GANTI KE LEFT JOIN
+            WHERE h.tpk_peminta = ?
+            ORDER BY h.tpk_tanggal DESC
+        `, [user_kode]);
             rows = [...draftRows, ...liveRows];
         }
 
