@@ -74,13 +74,15 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
 
         const tomorrow = new Date(today);
         tomorrow.setDate(tomorrow.getDate() + 1);
-        const minDateObj = addWorkdays(tomorrow, min_days - 1);
+        
+        // FIX: Hapus "- 1" agar benar-benar menghitung 14 hari kerja dari besok
+        const minDateObj = addWorkdays(tomorrow, min_days);
         const minDateStr = formatDateSafe(minDateObj);
 
         if (requestedDate < minDateObj) {
             return {
                 valid: false,
-                message: `Tanggal butuh untuk jabatan ini minimal ${min_days} hari kerja dari besok. Tanggal minimal: ${minDateStr}`,
+                message: `Tanggal butuh untuk jabatan ini minimal ${min_days} hari kerja dari besok. Saran tanggal: ${minDateStr}`,
                 minDate: minDateStr
             };
         }
@@ -593,24 +595,38 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
     try {
         let statusFilter = '';
         if (status === 'pending')  statusFilter = 'AND p.tpk_approveatasan = 0';
-        if (status === 'approved') statusFilter = 'AND p.tpk_approveatasan IN (1, 9)';
+        if (status === 'approved') statusFilter = 'AND p.tpk_approveatasan != 0';
         if (status === 'rejected') statusFilter = 'AND p.tpk_approveatasan = 2';
 
-        const [rows] = await db.execute(`
-            SELECT p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
-                   p.tpk_approveatasan, p.tpk_approveHRD,
-                   k.kar_nama as peminta,
-                   DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
-                   DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
-                   DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
-                   DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd
-            FROM ${DRAFT_TABLE} p
+        const SELECT_COLS = `
+            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_approveatasan, p.tpk_approveHRD,
+            k.kar_nama as peminta,
+            DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
+            DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
+            DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
+            DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd
+        `;
+
+        // Ambil dari DRAFT
+        const [draftRows] = await db.execute(`
+            SELECT ${SELECT_COLS} FROM ${DRAFT_TABLE} p
             INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            WHERE k.kar_nik_atasan = ?
-            ${statusFilter}
-            ORDER BY p.tpk_tanggal DESC
+            WHERE k.kar_nik_atasan = ? ${statusFilter}
         `, [user_kode]);
+
+        // Ambil dari LIVE (sudah disetujui HRD)
+        const [liveRows] = await db.execute(`
+            SELECT ${SELECT_COLS} FROM ${LIVE_TABLE} p
+            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
+            WHERE k.kar_nik_atasan = ? ${statusFilter}
+        `, [user_kode]);
+
+        // Gabungkan dan urutkan
+        const rows = [...draftRows, ...liveRows];
+        rows.sort((a, b) => new Date(b.tpk_tanggal) - new Date(a.tpk_tanggal));
 
         res.json({ success: true, data: rows });
     } catch (error) {
@@ -705,27 +721,51 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
     const { status } = req.query;
     try {
-        let statusFilter = 'AND p.tpk_approveatasan IN (1, 9)';
-        if (status === 'pending')  statusFilter += ' AND p.tpk_approveHRD = 0';
-        if (status === 'approved') statusFilter += ' AND p.tpk_approveHRD = 1';
+        let draftFilter = 'AND p.tpk_approveatasan IN (1, 9)';
+        let liveFilter  = 'AND p.tpk_approveatasan IN (1, 9)';
 
-        const [rows] = await db.execute(`
-            SELECT p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
-                   p.tpk_approveHRD, p.tpk_approveatasan,
-                   k.kar_nama as peminta,
-                   DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
-                   DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
-                   DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
-                   DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
-                   sla.sla_final_target_date, sla.sla_source, sla.sla_status,
-                   COALESCE(sla.sla_hired_count, 0) as hired_count
-            FROM ${DRAFT_TABLE} p
+        if (status === 'pending') {
+            draftFilter += ' AND p.tpk_approveHRD = 0';
+            liveFilter  += ' AND p.tpk_approveHRD = 0';
+        } else if (status === 'approved') {
+            draftFilter += ' AND p.tpk_approveHRD != 0';
+            liveFilter  += ' AND p.tpk_approveHRD != 0';
+        }
+
+        const SELECT_COLS = `
+            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_approveHRD, p.tpk_approveatasan,
+            k.kar_nama as peminta,
+            DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
+            DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
+            DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
+            DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
+            sla.sla_final_target_date, sla.sla_source, sla.sla_status,
+            COALESCE(sla.sla_hired_count, 0) as hired_count
+        `;
+
+        // Ambil dari DRAFT (Untuk yang Pending atau Rejected)
+        const [draftRows] = await db.execute(`
+            SELECT ${SELECT_COLS} FROM ${DRAFT_TABLE} p
             INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            WHERE 1=1 ${statusFilter}
-            ORDER BY p.tpk_tanggal DESC
+            WHERE 1=1 ${draftFilter}
         `);
+
+        // Ambil dari LIVE (Untuk yang sudah Approved)
+        const [liveRows] = await db.execute(`
+            SELECT ${SELECT_COLS} FROM ${LIVE_TABLE} p
+            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
+            LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+            WHERE 1=1 ${liveFilter}
+        `);
+
+        // Gabungkan dan urutkan
+        const rows = [...draftRows, ...liveRows];
+        rows.sort((a, b) => new Date(b.tpk_tanggal) - new Date(a.tpk_tanggal));
+
         res.json({ success: true, data: rows });
     } catch (error) {
         res.status(500).json({ success: false, message: error.message });
@@ -814,7 +854,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?,
-                1, ?,
+                ?, ?,  /* <--- FIX: Ubah '1, ?' menjadi '?, ?' di sini */
                 1, NOW()
             )
         `, [

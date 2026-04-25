@@ -32,61 +32,37 @@ router.get('/jabatan', async (req, res) => {
 /**
  * GET /api/master/bagian
  *
- * Menggabungkan dua sumber:
- *   1. rekruitmen2.tbagian (master baru — bisa ditambah HRD kapan saja)
- *   2. hrd2.tkaryawan.kar_bagian (legacy — untuk backward compat)
- *
- * Hasilnya di-deduplicate berdasarkan nama (case-insensitive via LOWER).
- * Urutkan A–Z. Hanya bagian aktif dari tbagian yang ditampilkan.
+ * HANYA mengambil data dari rekruitmen2.tbagian (master baru).
+ * Tidak lagi membaca dari hrd2.tkaryawan untuk menghindari nama usang (legacy) muncul.
  */
 router.get('/bagian', async (req, res) => {
     try {
         const { search } = req.query;
 
-        // Ambil dari master baru (rekruitmen2.tbagian)
-        let masterQuery = `
+        let query = `
             SELECT bag_nama AS bagian
             FROM rekruitmen2.tbagian
             WHERE bag_active = 1
         `;
-        const masterParams = [];
+        const params = [];
+        
         if (search) {
-            masterQuery += ' AND bag_nama LIKE ?';
-            masterParams.push(`%${search}%`);
+            query += ' AND bag_nama LIKE ?';
+            params.push(`%${search}%`);
         }
 
-        // Ambil dari legacy tkaryawan (fallback / pelengkap)
-        let legacyQuery = `
-            SELECT DISTINCT TRIM(kar_bagian) AS bagian
-            FROM hrd2.tkaryawan
-            WHERE kar_bagian IS NOT NULL AND TRIM(kar_bagian) != ''
-        `;
-        const legacyParams = [];
-        if (search) {
-            legacyQuery += ' AND kar_bagian LIKE ?';
-            legacyParams.push(`%${search}%`);
-        }
+        const [rows] = await db.execute(query, params);
 
-        const [[masterRows], [legacyRows]] = await Promise.all([
-            db.execute(masterQuery, masterParams),
-            db.execute(legacyQuery, legacyParams),
-        ]);
-
-        // Gabung & deduplicate (case-insensitive)
-        const seen = new Set();
-        const combined = [];
-        for (const row of [...masterRows, ...legacyRows]) {
-            const key = (row.bagian || '').trim().toLowerCase();
-            if (key && !seen.has(key)) {
-                seen.add(key);
-                combined.push({ kar_bagian: row.bagian.trim() });
-            }
-        }
+        // Format data menjadi array of objects { kar_bagian: "NAMA" }
+        // agar struktur response tetap sama dan Frontend/Android tidak error
+        const result = rows.map(row => ({
+            kar_bagian: row.bagian.trim()
+        }));
 
         // Sort A–Z
-        combined.sort((a, b) => a.kar_bagian.localeCompare(b.kar_bagian, 'id'));
+        result.sort((a, b) => a.kar_bagian.localeCompare(b.kar_bagian, 'id'));
 
-        res.json({ success: true, data: combined });
+        res.json({ success: true, data: result });
     } catch (error) {
         console.error('Error Get Bagian:', error);
         res.status(500).json({ success: false, message: 'Gagal mengambil data bagian', error: error.message });
