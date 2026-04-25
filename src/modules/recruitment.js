@@ -209,16 +209,16 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 ORDER BY p.tpk_tanggal DESC
             `, [user_kode]);
             // Ganti INNER JOIN menjadi LEFT JOIN di liveRows non-HRD:
-        const [liveRows] = await db.execute(`
-            SELECT ${SELECT_COLS}
-            FROM rekruitmen2.tpk_index_helper h
-            INNER JOIN ${LIVE_TABLE} p ON p.tpk_nomor = h.tpk_nomor
-            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
-            LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-            LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 👈 GANTI KE LEFT JOIN
-            WHERE h.tpk_peminta = ?
-            ORDER BY h.tpk_tanggal DESC
-        `, [user_kode]);
+// Ganti INNER JOIN menjadi LEFT JOIN dan BYPASS tpk_index_helper:
+            const [liveRows] = await db.execute(`
+                SELECT ${SELECT_COLS}
+                FROM ${LIVE_TABLE} p
+                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+                WHERE TRIM(p.tpk_peminta) = ?
+                ORDER BY p.tpk_tanggal DESC
+            `, [user_kode]);
             rows = [...draftRows, ...liveRows];
         }
 
@@ -600,29 +600,42 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         if (status === 'approved') statusFilter = 'AND p.tpk_approveatasan != 0';
         if (status === 'rejected') statusFilter = 'AND p.tpk_approveatasan = 2';
 
-        const SELECT_COLS = `
+        const SELECT_COLS_DRAFT = `
             p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
             p.tpk_approveatasan, p.tpk_approveHRD,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
             DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
-            DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd
+            DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
+            0 as is_legacy
+        `;
+
+        const SELECT_COLS_LIVE = `
+            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_approveatasan, p.tpk_approveHRD,
+            k.kar_nama as peminta,
+            DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
+            DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
+            DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
+            DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
+            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
         `;
 
         // Ambil dari DRAFT
         const [draftRows] = await db.execute(`
-            SELECT ${SELECT_COLS} FROM ${DRAFT_TABLE} p
+            SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
             INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             WHERE k.kar_nik_atasan = ? ${statusFilter}
         `, [user_kode]);
 
-        // Ambil dari LIVE (sudah disetujui HRD)
+        // Ambil dari LIVE (sudah disetujui HRD) - TAMBAH LEFT JOIN SLA
         const [liveRows] = await db.execute(`
-            SELECT ${SELECT_COLS} FROM ${LIVE_TABLE} p
+            SELECT ${SELECT_COLS_LIVE} FROM ${LIVE_TABLE} p
             INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
+            LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE k.kar_nik_atasan = ? ${statusFilter}
         `, [user_kode]);
 
@@ -734,7 +747,7 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             liveFilter  += ' AND p.tpk_approveHRD != 0';
         }
 
-        const SELECT_COLS = `
+        const SELECT_COLS_DRAFT = `
             p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
             p.tpk_approveHRD, p.tpk_approveatasan,
             k.kar_nama as peminta,
@@ -743,25 +756,38 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
             sla.sla_final_target_date, sla.sla_source, sla.sla_status,
-            COALESCE(sla.sla_hired_count, 0) as hired_count
+            COALESCE(sla.sla_hired_count, 0) as hired_count,
+            0 as is_legacy
         `;
 
-        // Ambil dari DRAFT (Untuk yang Pending atau Rejected)
+        const SELECT_COLS_LIVE = `
+            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_approveHRD, p.tpk_approveatasan,
+            k.kar_nama as peminta,
+            DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
+            DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
+            DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
+            DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
+            sla.sla_final_target_date, sla.sla_source, sla.sla_status,
+            COALESCE(sla.sla_hired_count, 0) as hired_count,
+            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
+        `;
+
+        // Ambil dari DRAFT
         const [draftRows] = await db.execute(`
-            SELECT ${SELECT_COLS} FROM ${DRAFT_TABLE} p
+            SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
             INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE 1=1 ${draftFilter}
         `);
 
-        // Ambil dari LIVE (Untuk yang sudah Approved)
-        // Ambil dari LIVE — INNER JOIN memastikan data legacy (tanpa SLA) tidak muncul
+        // Ambil dari LIVE (Untuk yang sudah Approved) -> GANTI KE LEFT JOIN
         const [liveRows] = await db.execute(`
-            SELECT ${SELECT_COLS} FROM ${LIVE_TABLE} p
+            SELECT ${SELECT_COLS_LIVE} FROM ${LIVE_TABLE} p
             INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
+            LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE 1=1 ${liveFilter}
         `);
         // Gabungkan dan urutkan
