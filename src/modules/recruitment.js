@@ -252,7 +252,9 @@ router.get('/detail', authenticate, async (req, res) => {
             DATE_FORMAT(t.tpk_tgl_approveatasan, '%Y-%m-%d') as tpk_tgl_approveatasan,
             t.tpk_approveHRD,
             DATE_FORMAT(t.tpk_tgl_approveHRD, '%Y-%m-%d') as tpk_tgl_approveHRD,
-            j.jab_nama, j.jab_kode,
+            COALESCE(j.jab_nama, t.tpk_jab_kode, 'Jabatan Dihapus') as jab_nama,
+            COALESCE(j.jab_kode, t.tpk_jab_kode, '-') as jab_kode,
+            COALESCE(t.tpk_jumlah, 1) as tpk_jumlah, /* 👈 Tambahan aman agar jumlah tidak null */
             sla.sla_original_requested_date,
             sla.sla_system_floor_date,
             sla.sla_final_target_date,
