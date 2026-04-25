@@ -265,7 +265,8 @@ router.get('/detail', authenticate, async (req, res) => {
             sla.sla_notes,
             sla.sla_calculated_at,
             sla.sla_completed_at,
-            sla.sla_hired_count
+            sla.sla_hired_count,
+            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
         `;
 
         // Cek draft dulu
