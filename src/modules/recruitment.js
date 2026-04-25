@@ -273,7 +273,7 @@ router.get('/detail', authenticate, async (req, res) => {
         const [draftRows] = await db.execute(`
             SELECT ${SELECT_DETAIL}
             FROM ${DRAFT_TABLE} t
-            JOIN hrd2.tjabatan j ON j.jab_kode = t.tpk_jab_kode
+            LEFT JOIN hrd2.tjabatan j ON j.jab_kode = t.tpk_jab_kode /* 👈 UBAH JOIN JADI LEFT JOIN */
             LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = TRIM(t.tpk_peminta)
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = t.tpk_nomor
             WHERE t.tpk_nomor = ?
@@ -287,7 +287,7 @@ router.get('/detail', authenticate, async (req, res) => {
         const [liveRows] = await db.execute(`
             SELECT ${SELECT_DETAIL}
             FROM ${LIVE_TABLE} t
-            JOIN hrd2.tjabatan j ON j.jab_kode = t.tpk_jab_kode
+            LEFT JOIN hrd2.tjabatan j ON j.jab_kode = t.tpk_jab_kode /* 👈 UBAH JOIN JADI LEFT JOIN */
             LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = TRIM(t.tpk_peminta)
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = t.tpk_nomor
             WHERE t.tpk_nomor = ?
