@@ -129,10 +129,12 @@ router.get('/stats', authenticate, async (req, res) => {
         );
 
 
-        // ── 3. PENDING APPROVAL (FIX: Tembak langsung ke DRAFT_TABLE) ──
+        // ── 3. PENDING APPROVAL (NEW & LEGACY) ──
         let pendingApproval = 0;
+        let pendingLegacy = 0; // Tambahan variabel baru
+
         if (is_hrd) {
-            // [FIX] Samakan WHERE clause dengan recruitment.js -> IN (1, 9)
+            // [A] New Pending (Draft / Bisa diproses)
             const approvalFilter = getDateFilter(period, 'p.tpk_tanggal');
             const approvalWhere  = approvalFilter.sql ? ` AND ${approvalFilter.sql}` : '';
             const [hrdApprovals] = await db.execute(
@@ -142,8 +144,21 @@ router.get('/stats', authenticate, async (req, res) => {
                 approvalFilter.params
             );
             pendingApproval = hrdApprovals[0].total;
+
+            // [B] Legacy Pending (Hanya read-only)
+            const legacyApprovalFilter = getDateFilter(period, 'h.tpk_tanggal');
+            const legacyApprovalWhere  = legacyApprovalFilter.sql ? ` AND ${legacyApprovalFilter.sql}` : '';
+            const [hrdLegacyApprovals] = await db.execute(
+                `SELECT COUNT(*) as total
+                 FROM rekruitmen2.tpk_index_helper h
+                 LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
+                 WHERE h.tpk_approveatasan IN (1, 9) AND h.tpk_approveHRD = 0 AND sla.sla_id IS NULL ${legacyApprovalWhere}`,
+                legacyApprovalFilter.params
+            );
+            pendingLegacy = hrdLegacyApprovals[0].total;
+
         } else {
-            // [FIX] Samakan WHERE clause dengan recruitment.js -> join tkaryawan, ke draft table
+            // [A] New Pending (Draft / Bisa diproses)
             const approvalFilter = getDateFilter(period, 'p.tpk_tanggal');
             const approvalWhere  = approvalFilter.sql ? ` AND ${approvalFilter.sql}` : '';
             const [approvals] = await db.execute(
@@ -156,6 +171,22 @@ router.get('/stats', authenticate, async (req, res) => {
                 [user_kode, ...approvalFilter.params]
             );
             pendingApproval = approvals[0].total;
+
+            // [B] Legacy Pending (Hanya read-only)
+            const legacyApprovalFilter = getDateFilter(period, 'h.tpk_tanggal');
+            const legacyApprovalWhere  = legacyApprovalFilter.sql ? ` AND ${legacyApprovalFilter.sql}` : '';
+            const [legacyApprovals] = await db.execute(
+                `SELECT COUNT(*) as total
+                 FROM rekruitmen2.tpk_index_helper h
+                 INNER JOIN hrd2.tkaryawan k ON k.kar_nik = h.tpk_peminta
+                 LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
+                 WHERE k.kar_nik_atasan = ?
+                   AND h.tpk_approveatasan = 0
+                   AND sla.sla_id IS NULL
+                   ${legacyApprovalWhere}`,
+                [user_kode, ...legacyApprovalFilter.params]
+            );
+            pendingLegacy = legacyApprovals[0].total;
         }
 
 
