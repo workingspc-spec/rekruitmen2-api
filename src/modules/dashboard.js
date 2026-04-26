@@ -213,6 +213,7 @@ router.get('/stats', authenticate, async (req, res) => {
                 legacyCount:     Number(legacyCount),
                 lowonganAktif:   Number(lowongan[0].total || 0),
                 pendingApproval: Number(pendingApproval || 0),
+                pendingLegacy:   Number(pendingLegacy || 0),
 
                 ...(is_hrd && {
                     sla: {
