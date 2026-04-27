@@ -1,13 +1,14 @@
 // src/middleware/authMiddleware.js
 const jwt = require('jsonwebtoken');
+const db = require('../config/db'); // ✅ 1. Import database untuk pengecekan token
 
 /**
  * =====================================================================
  * MIDDLEWARE: JWT AUTHENTICATION & AUTHORIZATION
  *
  * [FIX-KRITIS] Mendukung dua metode autentikasi:
- *   1. httpOnly Cookie (web browser) — token tidak bisa diakses JS
- *   2. Bearer Token via Authorization header (Android/API client)
+ * 1. httpOnly Cookie (web browser) — token tidak bisa diakses JS
+ * 2. Bearer Token via Authorization header (Android/API client)
  *
  * Urutan pemeriksaan: Bearer Token → Cookie
  * =====================================================================
@@ -17,7 +18,8 @@ const jwt = require('jsonwebtoken');
  * Middleware untuk verifikasi JWT Token
  * Mengisi req.user dengan data dari token
  */
-const authenticate = (req, res, next) => {
+// ✅ 2. Tambahkan 'async' di sini karena kita menggunakan 'await db.execute'
+const authenticate = async (req, res, next) => {
     try {
         let token = null;
 
@@ -28,7 +30,6 @@ const authenticate = (req, res, next) => {
         }
 
         // 2. Fallback ke httpOnly cookie (untuk web browser)
-        //    Cookie di-set oleh server saat login, tidak bisa diakses JS
         if (!token && req.cookies && req.cookies.token) {
             token = req.cookies.token;
         }
@@ -40,10 +41,28 @@ const authenticate = (req, res, next) => {
             });
         }
 
-        // Verify token
+        // Verify token (Secara matematis memastikan token asli buatan server kita)
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-        // Simpan data user ke request object
+        // ✅ 3. PENGECEKAN BLACKLIST (REVOKED TOKENS)
+        // Hanya cek jika token memiliki 'jti' (token lama yang belum ada jti akan tetap lolos)
+        if (decoded.jti) {
+            const [revoked] = await db.execute(
+                'SELECT 1 FROM rekruitmen2.t_revoked_tokens WHERE rt_jti = ? LIMIT 1',
+                [decoded.jti]
+            );
+
+            // Jika token ditemukan di tabel blacklist, tolak aksesnya
+            if (revoked.length > 0) {
+                res.clearCookie('token', { httpOnly: true, path: '/' });
+                return res.status(401).json({
+                    success: false,
+                    message: 'Sesi Anda telah berakhir (Logout). Silakan login kembali.'
+                });
+            }
+        }
+
+        // Jika aman, simpan data user ke request object
         req.user = {
             user_kode: decoded.user_kode,
             user_nama: decoded.user_nama,
@@ -123,7 +142,7 @@ const isManager = (req, res, next) => {
  * Optional middleware: bisa login atau tidak
  * Jika ada token (Bearer atau Cookie), decode. Jika tidak, lanjut tanpa req.user
  */
-const optionalAuth = (req, res, next) => {
+const optionalAuth = async (req, res, next) => { // ✅ Diubah menjadi async juga agar konsisten
     try {
         let token = null;
 
@@ -138,17 +157,30 @@ const optionalAuth = (req, res, next) => {
 
         if (token) {
             const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            req.user = {
-                user_kode: decoded.user_kode,
-                user_nama: decoded.user_nama,
-                user_hrd:  decoded.user_hrd
-            };
+            
+            // ✅ Cek blacklist untuk optional auth (opsional, tapi lebih baik)
+            let isRevoked = false;
+            if (decoded.jti) {
+                const [revoked] = await db.execute(
+                    'SELECT 1 FROM rekruitmen2.t_revoked_tokens WHERE rt_jti = ? LIMIT 1',
+                    [decoded.jti]
+                );
+                if (revoked.length > 0) isRevoked = true;
+            }
+
+            if (!isRevoked) {
+                req.user = {
+                    user_kode: decoded.user_kode,
+                    user_nama: decoded.user_nama,
+                    user_hrd:  decoded.user_hrd
+                };
+            }
         }
 
         next();
 
     } catch (error) {
-        // Jika token invalid, lanjut tanpa req.user (optional)
+        // Jika token invalid/expired, lanjut tanpa req.user (optional)
         next();
     }
 };

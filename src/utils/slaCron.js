@@ -1,3 +1,4 @@
+// src/cron/slaCron.js (Sesuaikan path jika berbeda)
 const cron = require('node-cron');
 const db   = require('../config/db');
 const { fullSync: syncIndexHelper } = require('./tpkIndexSync');
@@ -127,6 +128,19 @@ const runSlaSync = async () => {
         `);
     } catch (sequenceErr) {
         console.warn('[slaCron] Sequence sync failed (non-fatal):', sequenceErr.message);
+    }
+
+    // ✅ [SECURITY] Cleanup token expired dari database blacklist
+    // Diletakkan di akhir agar tidak mengganggu proses utama jika gagal
+    try {
+        const [result] = await db.execute(
+            'DELETE FROM rekruitmen2.t_revoked_tokens WHERE rt_expires_at < NOW()'
+        );
+        if (result.affectedRows > 0) {
+            console.log(`[Token Cleanup] Berhasil menghapus ${result.affectedRows} token kadaluarsa.`);
+        }
+    } catch (tokenErr) {
+        console.warn('[Token Cleanup] Gagal menghapus token kadaluarsa (non-fatal):', tokenErr.message);
     }
 };
 

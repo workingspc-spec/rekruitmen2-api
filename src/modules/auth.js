@@ -1,4 +1,5 @@
 // src/modules/auth.js
+const { randomUUID } = require('crypto');
 const rateLimit = require('express-rate-limit');
 const express   = require('express');
 const jwt       = require('jsonwebtoken');
@@ -92,9 +93,11 @@ router.post('/login', loginLimiter, async (req, res) => {
         }
 
         const tokenExpiry = expiredDays ? `${expiredDays}d` : '24h';
+        const jti = randomUUID(); // ✅ GENERATE JWT ID UNIK
 
         const token = jwt.sign(
             {
+                jti: jti, // ✅ SISIPKAN JTI KE DALAM PAYLOAD
                 user_kode: user.user_kode,
                 user_nama: user.user_nama,
                 user_hrd:  user.user_hrd
@@ -130,15 +133,38 @@ router.post('/login', loginLimiter, async (req, res) => {
 
 /**
  * POST /api/auth/logout
- * PUBLIC — Logout endpoint, hapus httpOnly cookie
+ * PUBLIC — Logout endpoint, hapus httpOnly cookie & blacklist token
  */
-router.post('/logout', (req, res) => {
+router.post('/logout', async (req, res) => { // ✅ PASTIKAN TAMBAH 'async'
+    // Coba masukkan token ke daftar blacklist jika token ada
+    try {
+        const token = req.cookies?.token;
+        if (token) {
+            const decoded = jwt.decode(token); // Decode saja tanpa verifikasi signature
+            if (decoded?.jti && decoded?.exp) {
+                const expiresAt = new Date(decoded.exp * 1000);
+                // Masukkan ke database
+                await db.execute(
+                    `INSERT IGNORE INTO rekruitmen2.t_revoked_tokens 
+                     (rt_jti, rt_user_kode, rt_expires_at) 
+                     VALUES (?, ?, ?)`,
+                    [decoded.jti, decoded.user_kode ?? 'unknown', expiresAt]
+                );
+            }
+        }
+    } catch (error) {
+        // Jika gagal insert (misal DB down sementara), jangan hentikan proses logout.
+        // Biarkan lanjut ke res.clearCookie agar sesi di browser pengguna tetap terhapus.
+        console.error('❌ Blacklist Token Error:', error);
+    }
+
     res.clearCookie('token', {
         httpOnly: true,
-        secure:   false, // SESUAIKAN DENGAN YANG DI ATAS
+        secure:   false, // SESUAIKAN DENGAN YANG DI ATAS (false untuk HTTP)
         sameSite: 'lax', // SESUAIKAN DENGAN YANG DI ATAS
         path:     '/',
     });
+    
     res.json({ success: true, message: 'Logout berhasil' });
 });
 
