@@ -144,6 +144,8 @@ app.get('/', (_, res) => res.send('Backend Rekruitmen is Running! 🚀'));
 
 app.use('/api/app-version', require('./src/modules/appVersion'));
 app.use('/api/auth',        require('./src/modules/auth'));
+// ✅ TAMBAHKAN BARIS INI: Endpoint publik untuk menerima log (tanpa authenticate)
+app.use('/api/logs',        require('./src/modules/clientLogs'));
 app.use('/api/master',      authenticate, require('./src/modules/masterData'));
 app.use('/api/recruitment', authenticate, require('./src/modules/recruitment'));
 app.use('/api/dashboard',   authenticate, require('./src/modules/dashboard'));
