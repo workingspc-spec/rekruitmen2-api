@@ -135,15 +135,25 @@ router.post('/login', loginLimiter, async (req, res) => {
  * POST /api/auth/logout
  * PUBLIC — Logout endpoint, hapus httpOnly cookie & blacklist token
  */
-router.post('/logout', async (req, res) => { // ✅ PASTIKAN TAMBAH 'async'
-    // Coba masukkan token ke daftar blacklist jika token ada
+router.post('/logout', async (req, res) => {
     try {
-        const token = req.cookies?.token;
+        // ✅ 1. Coba ambil token dari Authorization header (untuk Android)
+        let token = null;
+        const authHeader = req.headers.authorization;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.substring(7);
+        }
+        
+        // ✅ 2. Jika tidak ada di header, ambil dari Cookie (untuk Web)
+        if (!token && req.cookies && req.cookies.token) {
+            token = req.cookies.token;
+        }
+
+        // ✅ 3. Jika token ditemukan (dari manapun asalnya), masukkan ke blacklist
         if (token) {
             const decoded = jwt.decode(token); // Decode saja tanpa verifikasi signature
             if (decoded?.jti && decoded?.exp) {
                 const expiresAt = new Date(decoded.exp * 1000);
-                // Masukkan ke database
                 await db.execute(
                     `INSERT IGNORE INTO rekruitmen2.t_revoked_tokens 
                      (rt_jti, rt_user_kode, rt_expires_at) 
@@ -153,15 +163,14 @@ router.post('/logout', async (req, res) => { // ✅ PASTIKAN TAMBAH 'async'
             }
         }
     } catch (error) {
-        // Jika gagal insert (misal DB down sementara), jangan hentikan proses logout.
-        // Biarkan lanjut ke res.clearCookie agar sesi di browser pengguna tetap terhapus.
         console.error('❌ Blacklist Token Error:', error);
     }
 
+    // Selalu bersihkan cookie (berpengaruh ke web, diabaikan oleh Android)
     res.clearCookie('token', {
         httpOnly: true,
-        secure:   false, // SESUAIKAN DENGAN YANG DI ATAS (false untuk HTTP)
-        sameSite: 'lax', // SESUAIKAN DENGAN YANG DI ATAS
+        secure:   false, // UBAH JADI TRUE JIKA SUDAH PAKAI HTTPS
+        sameSite: 'lax',
         path:     '/',
     });
     
