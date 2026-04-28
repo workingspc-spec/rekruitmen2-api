@@ -72,7 +72,7 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
         const { min_days, is_flexible } = rows[0];
         if (is_flexible === 1) return { valid: true };
 
-        const tomorrow = new Date(today);
+        const tomorrow = new Date(today); //sepertinyadeadcodedantidakdigunakan
         const minDateObj = addWorkdays(today, min_days);
         const minDateStr = formatDateSafe(minDateObj);
 
@@ -138,8 +138,6 @@ router.get('/jabatan-rules', authenticate, async (req, res) => {
 
 // ── GET my-requests ──────────────────────────────────────────────────────────
 // Gabungkan DRAFT (belum HRD approve) + LIVE (sudah HRD approve)
-// ── GET my-requests ──────────────────────────────────────────────────────────
-// Gabungkan DRAFT (belum HRD approve) + LIVE (sudah HRD approve)
 router.get('/my-requests', authenticate, async (req, res) => {
     const user_kode = req.user.user_kode;
     const is_hrd    = req.user.user_hrd;
@@ -195,6 +193,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 ORDER BY p.tpk_tanggal DESC
             `);
             rows = [...draftRows, ...liveRows];
+            rows.sort((a, b) => new Date(b.tpk_tanggal) - new Date(a.tpk_tanggal)); // ✅ Tambahan F-02
         } else {
             // Non-HRD: lihat milik sendiri dari DRAFT + LIVE
             const [draftRows] = await db.execute(`
@@ -217,6 +216,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 ORDER BY p.tpk_tanggal DESC
             `, [user_kode]);
             rows = [...draftRows, ...liveRows];
+            rows.sort((a, b) => new Date(b.tpk_tanggal) - new Date(a.tpk_tanggal)); // ✅ Tambahan F-02
         }
 
         res.json({ success: true, data: rows });
@@ -628,7 +628,7 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            WHERE k.kar_nik_atasan = ? ${statusFilter}
+            WHERE TRIM(k.kar_nik_atasan) = ? ${statusFilter}
         `, [user_kode]);
 
         // Ambil dari LIVE (sudah disetujui HRD) - TAMBAH LEFT JOIN SLA
@@ -637,7 +637,7 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            WHERE k.kar_nik_atasan = ? ${statusFilter}
+            WHERE TRIM(k.kar_nik_atasan) = ? ${statusFilter}
         `, [user_kode]);
 
         // Gabungkan dan urutkan
@@ -786,7 +786,7 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
         // Ambil dari LIVE (Untuk yang sudah Approved) -> GANTI KE LEFT JOIN
         const [liveRows] = await db.execute(`
             SELECT ${SELECT_COLS_LIVE} FROM ${LIVE_TABLE} p
-            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE 1=1 ${liveFilter}
@@ -939,8 +939,9 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             master.jlt_max_days += extraDays;
         }
 
-        const approvedAt = new Date();
-        approvedAt.setHours(0, 0, 0, 0);
+        const nowWIB = new Date(new Date().getTime() + 7 * 60 * 60 * 1000);
+        nowWIB.setUTCHours(0, 0, 0, 0);
+        const approvedAt = nowWIB;
 
         const rawOriginal = current.sla_original_requested_date?.toString().split('T')[0]
             || current.tpk_tgl_butuh?.toString().split('T')[0];
@@ -1010,11 +1011,18 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         await connection.commit();
         connection.release();
 
+        const explanationMsg = slaSource === 'SYSTEM'
+            ? `Tanggal butuh terlalu mepet. Otomatis digeser ke ${formatDateSafe(finalTargetDate)}.`
+            : slaSource === 'USER'
+                ? `Tanggal butuh sesuai permintaan (${formatDateSafe(requestedDate)}). SLA mulai dihitung.`
+                : 'Jabatan fleksibel — target sesuai permintaan.';
+
         return res.json({
             success: true,
             message: 'HRD berhasil Approve — Rekrutmen Dibuka & SLA mulai dihitung.',
             data: {
                 sla_info: {
+                    explanation: explanationMsg,
                     original_requested_date: formatDateSafe(requestedDate),
                     system_floor_date:       formatDateSafe(systemFloorDate),
                     final_target_date:       formatDateSafe(finalTargetDate),
@@ -1067,12 +1075,6 @@ router.delete('/batch-delete', authenticate, async (req, res) => {
         const slaMap = {};
         slaRows.forEach(r => { slaMap[r.sla_tpk_nomor] = r.sla_id; });
 
-        const logValues = tpkNomors.map(nomor => [nomor, slaMap[nomor]||null, 'batch_deleted', 'PENDING', 'DELETED_BY_USER', userKode, new Date()]);
-        await conn.query(
-            `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, field_name, old_value, new_value, user_kode, created_at) VALUES ?`,
-            [logValues]
-        );
-
         await conn.execute(
             `DELETE FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor IN (${placeholders}) AND sla_status = 'PENDING'`,
             tpkNomors
@@ -1082,6 +1084,13 @@ router.delete('/batch-delete', authenticate, async (req, res) => {
             tpkNomors
         );
         await syncDeleteRows(conn, tpkNomors);
+        
+        // ✅ Pindahan F-03 (Log dilakukan SETELAH delete sukses)
+        const logValues = tpkNomors.map(nomor => [nomor, slaMap[nomor]||null, 'batch_deleted', 'PENDING', 'DELETED_BY_USER', userKode, new Date()]);
+        await conn.query(
+            `INSERT INTO rekruitmen2.t_pkar_log (tpk_nomor, sla_id, field_name, old_value, new_value, user_kode, created_at) VALUES ?`,
+            [logValues]
+        );
 
         await conn.commit();
         res.json({ success: true, deleted: tpkNomors.length });
@@ -1196,7 +1205,7 @@ router.patch('/:tpkNomor/editable', authenticate, isHRD, async (req, res) => {
     } finally { conn.release(); }
 });
 
-router.post('/:tpkNomor/no-show', authenticate, async (req, res) => {
+router.post('/:tpkNomor/no-show', authenticate, isHRD, async (req, res) => {
     const { tpkNomor } = req.params;
     const { bufferDays, keterangan } = req.body;
     const userKode = req.user?.user_kode;
@@ -1248,7 +1257,7 @@ router.get('/:tpkNomor/hired-candidates', authenticate, async (req, res) => {
     }
 });
 
-router.post('/:tpkNomor/cancel-candidate', authenticate, async (req, res) => {
+router.post('/:tpkNomor/cancel-candidate', authenticate, isHRD, async (req, res) => {
     const connection = await db.getConnection();
     try {
         await connection.beginTransaction();

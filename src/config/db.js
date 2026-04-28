@@ -22,6 +22,9 @@ const pool = mysql.createPool({
     dateStrings: true    // ✅ PENTING: Kembalikan DATE/DATETIME sebagai string
 });
 
+pool.on('connection', (connection) => {
+    connection.query("SET time_zone = '+07:00'");
+});
 const db = pool.promise();
 
 // Test koneksi awal dengan explicit timezone setting

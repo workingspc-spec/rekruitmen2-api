@@ -92,7 +92,15 @@ router.post('/login', loginLimiter, async (req, res) => {
             });
         }
 
-        const tokenExpiry = expiredDays ? `${expiredDays}d` : '24h';
+        const ALLOWED_EXPIRY_DAYS = [1, 7, 14, 30];
+        let tokenExpiry = '24h';
+        if (expiredDays) {
+            const days = parseInt(expiredDays, 10);
+            if (!ALLOWED_EXPIRY_DAYS.includes(days)) {
+                return res.status(400).json({ success: false, message: 'expiredDays tidak valid' });
+            }
+            tokenExpiry = `${days}d`;
+        }
         const jti = randomUUID(); // ✅ GENERATE JWT ID UNIK
 
         const token = jwt.sign(
