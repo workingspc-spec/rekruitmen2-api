@@ -751,7 +751,7 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
         }
 
         const SELECT_COLS_DRAFT = `
-            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_nomor, p.tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
             p.tpk_approveHRD, p.tpk_approveatasan,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
@@ -764,7 +764,7 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
         `;
 
         const SELECT_COLS_LIVE = `
-            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_nomor, p.tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
             p.tpk_approveHRD, p.tpk_approveatasan,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
@@ -842,6 +842,15 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             await connection.rollback();
             connection.release();
             return res.status(400).json({ success: false, message: 'Sudah pernah diproses HRD' });
+        }
+                // ✅ TAMBAHAN: cegah self-approval
+        if (current.tpk_peminta === req.user.user_kode) {
+            await connection.rollback();
+            connection.release();
+            return res.status(403).json({
+                success: false,
+                message: 'Tidak diizinkan: Anda tidak dapat menyetujui permintaan Anda sendiri.'
+            });
         }
 
         // ── REJECT — tetap di draft, update status ───────────────────────────
@@ -968,6 +977,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         await connection.execute(
             `UPDATE rekruitmen2.t_recruitment_sla SET
                 sla_approved_at               = NOW(),
+                sla_approved_by              = ?,
                 sla_calculated_at             = NOW(),
                 sla_min_days                  = ?,
                 sla_max_days                  = ?,
@@ -982,6 +992,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 sla_notes                     = LEFT(CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Disetujui HRD — rekrutmen dibuka.', ?), ${MAX_NOTES_LENGTH}),
                 sla_status                    = 'CALCULATED'
              WHERE sla_tpk_nomor = ?`,
+            [req.user.user_kode, alasan_tolak.trim(), tpk_nomor]
             [
                 master.jlt_min_days, master.jlt_max_days, master.jlt_is_flexible,
                 formatDateSafe(systemFloorDate), formatDateSafe(finalTargetDate),
