@@ -597,7 +597,8 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
     try {
         let statusFilter = '';
         if (status === 'pending')  statusFilter = 'AND p.tpk_approveatasan = 0';
-        if (status === 'approved') statusFilter = 'AND p.tpk_approveatasan != 0';
+        // ✅ PERBAIKAN — Hanya nilai approve (9 = approve dari atasan, 1 = approve final):
+        if (status === 'approved') statusFilter = 'AND p.tpk_approveatasan IN (1, 9)';
         if (status === 'rejected') statusFilter = 'AND p.tpk_approveatasan = 2';
 
         const SELECT_COLS_DRAFT = `
@@ -625,7 +626,7 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         // Ambil dari DRAFT
         const [draftRows] = await db.execute(`
             SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
-            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             WHERE k.kar_nik_atasan = ? ${statusFilter}
         `, [user_kode]);
@@ -633,7 +634,7 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         // Ambil dari LIVE (sudah disetujui HRD) - TAMBAH LEFT JOIN SLA
         const [liveRows] = await db.execute(`
             SELECT ${SELECT_COLS_LIVE} FROM ${LIVE_TABLE} p
-            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE k.kar_nik_atasan = ? ${statusFilter}
@@ -841,7 +842,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             return res.status(400).json({ success: false, message: 'Sudah pernah diproses HRD' });
         }
                 // ✅ TAMBAHAN: cegah self-approval
-        if (current.tpk_peminta === req.user.user_kode) {
+        if (current.tpk_peminta?.trim() === req.user.user_kode?.trim()) {
             await connection.rollback();
             connection.release();
             return res.status(403).json({
@@ -974,7 +975,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         await connection.execute(
             `UPDATE rekruitmen2.t_recruitment_sla SET
                 sla_approved_at               = NOW(),
-                sla_approved_by              = ?,
+                sla_approved_by               = ?,
                 sla_calculated_at             = NOW(),
                 sla_min_days                  = ?,
                 sla_max_days                  = ?,
@@ -988,13 +989,21 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 sla_user_vs_system_diff_days  = ?,
                 sla_notes                     = LEFT(CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Disetujui HRD — rekrutmen dibuka.', ?), ${MAX_NOTES_LENGTH}),
                 sla_status                    = 'CALCULATED'
-             WHERE sla_tpk_nomor = ?`,
-            [req.user.user_kode, alasan_tolak.trim(), tpk_nomor]
+            WHERE sla_tpk_nomor = ?`,
             [
-                master.jlt_min_days, master.jlt_max_days, master.jlt_is_flexible,
-                formatDateSafe(systemFloorDate), formatDateSafe(finalTargetDate),
-                formatDateSafe(maxTargetDate), formatDateSafe(requestedDate),
-                slaSource, approvalDelayDays, diffDays, bulkNote, tpk_nomor
+                req.user.user_kode,
+                master.jlt_min_days, 
+                master.jlt_max_days, 
+                master.jlt_is_flexible,
+                formatDateSafe(systemFloorDate), 
+                formatDateSafe(finalTargetDate),
+                formatDateSafe(maxTargetDate), 
+                formatDateSafe(requestedDate),
+                slaSource, 
+                approvalDelayDays, 
+                diffDays, 
+                bulkNote, 
+                tpk_nomor
             ]
         );
 
