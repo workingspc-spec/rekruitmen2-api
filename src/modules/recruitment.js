@@ -73,10 +73,7 @@ async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLea
         if (is_flexible === 1) return { valid: true };
 
         const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        
-        // FIX: Hapus "- 1" agar benar-benar menghitung 14 hari kerja dari besok
-        const minDateObj = addWorkdays(tomorrow, min_days);
+        const minDateObj = addWorkdays(today, min_days);
         const minDateStr = formatDateSafe(minDateObj);
 
         if (requestedDate < minDateObj) {
