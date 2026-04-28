@@ -92,7 +92,7 @@ router.post('/login', loginLimiter, async (req, res) => {
             });
         }
 
-        const ALLOWED_EXPIRY_DAYS = [1, 7, 14, 30];
+        const ALLOWED_EXPIRY_DAYS = [1, 3, 7, 14, 30];
         let tokenExpiry = '24h';
         if (expiredDays) {
             const days = parseInt(expiredDays, 10);
