@@ -116,10 +116,6 @@ const isHRD = (req, res, next) => {
     next();
 };
 
-/**
- * Middleware untuk memeriksa apakah user adalah Manager/Atasan
- * (user yang bukan HRD)
- */
 const isManager = (req, res, next) => {
     if (!req.user) {
         return res.status(401).json({
@@ -128,12 +124,7 @@ const isManager = (req, res, next) => {
         });
     }
 
-    if (req.user.user_hrd === 1) {
-        return res.status(403).json({
-            success: false,
-            message: 'Akses ditolak: Endpoint ini hanya untuk Manager/Atasan'
-        });
-    }
+    // HAPUS blok if (req.user.user_hrd === 1) {...} yang lama
 
     next();
 };

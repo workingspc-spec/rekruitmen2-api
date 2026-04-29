@@ -131,7 +131,7 @@ router.get('/stats', authenticate, async (req, res) => {
 
         // ── 3. PENDING APPROVAL (NEW & LEGACY) ──
         let pendingApproval = 0;
-        let pendingLegacy = 0; // Tambahan variabel baru
+        let pendingLegacy = 0;
 
         if (is_hrd) {
             // [A] New Pending (Draft / Bisa diproses)
@@ -140,8 +140,17 @@ router.get('/stats', authenticate, async (req, res) => {
             const [hrdApprovals] = await db.execute(
                 `SELECT COUNT(*) as total
                  FROM rekruitmen2.tpermintaan_draft p
-                 WHERE p.tpk_approveatasan IN (1, 9) AND p.tpk_approveHRD = 0 ${approvalWhere}`,
-                approvalFilter.params
+                 LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
+                 LEFT JOIN rekruitmen2.t_approval_mapping am ON am.am_bagian = p.tpk_bagian AND am.am_active = 1
+                 WHERE (
+                    (p.tpk_approveatasan IN (1, 9) AND p.tpk_approveHRD = 0) 
+                    OR 
+                    (
+                       (TRIM(am.am_approver_nik) = ? OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?)) 
+                       AND p.tpk_approveatasan = 0
+                    )
+                 ) ${approvalWhere}`,
+                [user_kode, user_kode, ...approvalFilter.params]
             );
             pendingApproval = hrdApprovals[0].total;
 
@@ -151,9 +160,19 @@ router.get('/stats', authenticate, async (req, res) => {
             const [hrdLegacyApprovals] = await db.execute(
                 `SELECT COUNT(*) as total
                  FROM rekruitmen2.tpk_index_helper h
+                 LEFT JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
+                 LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = h.tpk_peminta
                  LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
-                 WHERE h.tpk_approveatasan IN (1, 9) AND h.tpk_approveHRD = 0 AND sla.sla_id IS NULL ${legacyApprovalWhere}`,
-                legacyApprovalFilter.params
+                 LEFT JOIN rekruitmen2.t_approval_mapping am ON am.am_bagian = p.tpk_bagian AND am.am_active = 1
+                 WHERE (
+                    (h.tpk_approveatasan IN (1, 9) AND h.tpk_approveHRD = 0)
+                    OR
+                    (
+                       (TRIM(am.am_approver_nik) = ? OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?)) 
+                       AND h.tpk_approveatasan = 0
+                    )
+                 ) AND sla.sla_id IS NULL ${legacyApprovalWhere}`,
+                [user_kode, user_kode, ...legacyApprovalFilter.params]
             );
             pendingLegacy = hrdLegacyApprovals[0].total;
 
@@ -164,11 +183,12 @@ router.get('/stats', authenticate, async (req, res) => {
             const [approvals] = await db.execute(
                 `SELECT COUNT(*) as total
                  FROM rekruitmen2.tpermintaan_draft p
-                 INNER JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
-                 WHERE k.kar_nik_atasan = ?
+                 LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
+                 LEFT JOIN rekruitmen2.t_approval_mapping am ON am.am_bagian = p.tpk_bagian AND am.am_active = 1
+                 WHERE (TRIM(am.am_approver_nik) = ? OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?))
                    AND p.tpk_approveatasan = 0
                    ${approvalWhere}`,
-                [user_kode, ...approvalFilter.params]
+                [user_kode, user_kode, ...approvalFilter.params]
             );
             pendingApproval = approvals[0].total;
 
@@ -178,13 +198,15 @@ router.get('/stats', authenticate, async (req, res) => {
             const [legacyApprovals] = await db.execute(
                 `SELECT COUNT(*) as total
                  FROM rekruitmen2.tpk_index_helper h
-                 INNER JOIN hrd2.tkaryawan k ON k.kar_nik = h.tpk_peminta
+                 LEFT JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
+                 LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = h.tpk_peminta
                  LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = h.tpk_nomor
-                 WHERE k.kar_nik_atasan = ?
+                 LEFT JOIN rekruitmen2.t_approval_mapping am ON am.am_bagian = p.tpk_bagian AND am.am_active = 1
+                 WHERE (TRIM(am.am_approver_nik) = ? OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?))
                    AND h.tpk_approveatasan = 0
                    AND sla.sla_id IS NULL
                    ${legacyApprovalWhere}`,
-                [user_kode, ...legacyApprovalFilter.params]
+                [user_kode, user_kode, ...legacyApprovalFilter.params]
             );
             pendingLegacy = legacyApprovals[0].total;
         }

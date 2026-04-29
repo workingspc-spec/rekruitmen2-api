@@ -366,4 +366,93 @@ router.get('/holidays', async (req, res) => {
     }
 });
 
+// ── APPROVAL MAPPING (Departemen ke Atasan Khusus) ───────────────────────────
+
+router.get('/approval-mapping', isHRD, async (req, res) => {
+    try {
+        const [rows] = await db.execute(`
+            SELECT 
+                am.am_id, 
+                am.am_bagian, 
+                am.am_approver_nik, 
+                am.am_active,
+                k.kar_nama as approver_name,
+                j.jab_nama as approver_jabatan
+            FROM rekruitmen2.t_approval_mapping am
+            LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = am.am_approver_nik
+            LEFT JOIN hrd2.tjabatan j ON j.jab_kode = k.kar_jab_kode
+            ORDER BY am.am_active DESC, am.am_bagian ASC
+        `);
+        res.json({ success: true, data: rows });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+router.post('/approval-mapping', isHRD, async (req, res) => {
+    const { am_bagian, am_approver_nik } = req.body;
+
+    if (!am_bagian || !am_approver_nik) {
+        return res.status(400).json({ success: false, message: 'Bagian dan NIK Approver wajib diisi' });
+    }
+
+    try {
+        const [karCheck] = await db.execute('SELECT kar_nama FROM hrd2.tkaryawan WHERE kar_Nik = ?', [am_approver_nik.trim()]);
+        if (karCheck.length === 0) {
+            return res.status(404).json({ success: false, message: `NIK ${am_approver_nik} tidak ditemukan.` });
+        }
+
+        await db.execute(
+            `INSERT INTO rekruitmen2.t_approval_mapping (am_bagian, am_approver_nik, am_active) 
+             VALUES (?, ?, 1)
+             ON DUPLICATE KEY UPDATE 
+                am_approver_nik = VALUES(am_approver_nik),
+                am_active = 1`,
+            [am_bagian.trim(), am_approver_nik.trim()]
+        );
+
+        res.json({ success: true, message: 'Mapping berhasil disimpan' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+router.patch('/approval-mapping/:id', isHRD, async (req, res) => {
+    const { id } = req.params;
+    const { am_approver_nik, am_active } = req.body;
+
+    const updates = [];
+    const params  = [];
+
+    if (am_approver_nik !== undefined) {
+        updates.push('am_approver_nik = ?');
+        params.push(am_approver_nik.trim());
+    }
+    if (am_active !== undefined) {
+        updates.push('am_active = ?');
+        params.push(am_active ? 1 : 0);
+    }
+    
+    if (updates.length === 0) return res.status(400).json({ success: false, message: 'Tidak ada data yang diubah' });
+    
+    params.push(id);
+
+    try {
+        const [result] = await db.execute(`UPDATE rekruitmen2.t_approval_mapping SET ${updates.join(', ')} WHERE am_id = ?`, params);
+        if (result.affectedRows === 0) return res.status(404).json({ success: false, message: 'Mapping tidak ditemukan' });
+        res.json({ success: true, message: 'Mapping berhasil diupdate' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+router.delete('/approval-mapping/:id', isHRD, async (req, res) => {
+    try {
+        await db.execute('DELETE FROM rekruitmen2.t_approval_mapping WHERE am_id = ?', [req.params.id]);
+        res.json({ success: true, message: 'Mapping berhasil dihapus' });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
 module.exports = router;

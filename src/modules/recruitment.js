@@ -623,22 +623,40 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
         `;
 
-        // Ambil dari DRAFT
+        // ── 1. Ambil dari DRAFT ──
         const [draftRows] = await db.execute(`
             SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            WHERE TRIM(k.kar_nik_atasan) = ? ${statusFilter}
-        `, [user_kode]);
+            /* 👇 JOIN BERDASARKAN BAGIAN YANG DIPILIH DI FORM */
+            LEFT JOIN rekruitmen2.t_approval_mapping am 
+              ON am.am_bagian = p.tpk_bagian 
+             AND am.am_active = 1
+            WHERE (
+                /* Jika ada mapping, gunakan NIK di mapping */
+                TRIM(am.am_approver_nik) = ? 
+                /* Jika tidak ada mapping (NULL), fallback ke atasan asli di profil */
+                OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?)
+            ) 
+            ${statusFilter} /* 👈 Gunakan variabel filter dinamis, BUKAN hardcode = 0 */
+        `, [user_kode, user_kode]);
 
-        // Ambil dari LIVE (sudah disetujui HRD) - TAMBAH LEFT JOIN SLA
+        // ── 2. Ambil dari LIVE (Untuk Riwayat "Sudah Approve") ──
         const [liveRows] = await db.execute(`
             SELECT ${SELECT_COLS_LIVE} FROM ${LIVE_TABLE} p
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            WHERE TRIM(k.kar_nik_atasan) = ? ${statusFilter}
-        `, [user_kode]);
+            /* 👇 JOIN MAPPING JUGA DI SINI */
+            LEFT JOIN rekruitmen2.t_approval_mapping am 
+              ON am.am_bagian = p.tpk_bagian 
+             AND am.am_active = 1
+            WHERE (
+                TRIM(am.am_approver_nik) = ? 
+                OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?)
+            ) 
+            ${statusFilter}
+        `, [user_kode, user_kode]);
 
         // Gabungkan dan urutkan
         const rows = [...draftRows, ...liveRows];
@@ -673,10 +691,12 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         // Ambil dari DRAFT saja
         const [checkRows] = await connection.execute(
             `SELECT p.tpk_approveatasan, p.tpk_tanggal, p.tpk_tgl_butuh,
-                    p.tpk_jab_kode, p.tpk_jumlah, k.kar_nik_atasan,
+                    p.tpk_jab_kode, p.tpk_jumlah, p.tpk_bagian, k.kar_nik_atasan,
+                    am.am_approver_nik,
                     sla.sla_id, sla.sla_original_requested_date, sla.sla_request_created_at
              FROM ${DRAFT_TABLE} p
              LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
+             LEFT JOIN rekruitmen2.t_approval_mapping am ON am.am_bagian = p.tpk_bagian AND am.am_active = 1
              LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
              WHERE p.tpk_nomor = ? FOR UPDATE`,
             [tpk_nomor]
@@ -689,10 +709,12 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         }
 
         const data = checkRows[0];
-        if (data.kar_nik_atasan !== req.user.user_kode) {
+
+        const validApprover = data.am_approver_nik ? data.am_approver_nik.trim() : data.kar_nik_atasan?.trim();
+        if (validApprover !== req.user.user_kode) {
             await connection.rollback();
             connection.release();
-            return res.status(403).json({ success: false, message: 'Akses ditolak' });
+            return res.status(403).json({ success: false, message: 'Akses ditolak: Anda bukan atasan untuk bagian ini' });
         }
         if (data.tpk_approveatasan !== 0) {
             await connection.rollback();
