@@ -424,7 +424,33 @@ router.patch('/approval-mapping/:id', isHRD, async (req, res) => {
     const updates = [];
     const params  = [];
 
+    // ✅ TAMBAHAN: Validasi panjang ID
+    if (isNaN(parseInt(id))) {
+        return res.status(400).json({ success: false, message: 'ID tidak valid' });
+    }
+
     if (am_approver_nik !== undefined) {
+        // ✅ TAMBAHAN: Validasi format NIK
+        if (typeof am_approver_nik !== 'string' || am_approver_nik.trim().length === 0 || am_approver_nik.length > 20) {
+            return res.status(400).json({ success: false, message: 'Format NIK tidak valid (maks 20 karakter)' });
+        }
+        
+        // ✅ TAMBAHAN: Validasi keberadaan NIK di database (konsisten dengan POST)
+        try {
+            const [karCheck] = await db.execute(
+                'SELECT kar_nama FROM hrd2.tkaryawan WHERE kar_Nik = ?',
+                [am_approver_nik.trim()]
+            );
+            if (karCheck.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: `NIK ${am_approver_nik.trim()} tidak ditemukan di database karyawan.`
+                });
+            }
+        } catch (dbErr) {
+            return res.status(500).json({ success: false, message: dbErr.message });
+        }
+
         updates.push('am_approver_nik = ?');
         params.push(am_approver_nik.trim());
     }

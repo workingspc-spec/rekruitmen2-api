@@ -602,7 +602,7 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         if (status === 'rejected') statusFilter = 'AND p.tpk_approveatasan = 2';
 
         const SELECT_COLS_DRAFT = `
-            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_nomor, TRIM(p.tpk_peminta) as tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
             p.tpk_approveatasan, p.tpk_approveHRD,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
@@ -613,7 +613,7 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         `;
 
         const SELECT_COLS_LIVE = `
-            p.tpk_nomor, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
+            p.tpk_nomor, TRIM(p.tpk_peminta) as tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
             p.tpk_approveatasan, p.tpk_approveHRD,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
@@ -716,6 +716,14 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             connection.release();
             return res.status(403).json({ success: false, message: 'Akses ditolak: Anda bukan atasan untuk bagian ini' });
         }
+        if (data.tpk_bagian && (data.tpk_peminta?.trim() === req.user.user_kode?.trim())) {
+            await connection.rollback();
+            connection.release();
+            return res.status(403).json({
+                success: false,
+                message: 'Tidak diizinkan: Anda tidak dapat menyetujui permintaan Anda sendiri.'
+            });
+        }
         if (data.tpk_approveatasan !== 0) {
             await connection.rollback();
             connection.release();
@@ -797,9 +805,10 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
         `;
 
         // Ambil dari DRAFT
+        // SESUDAH (konsisten dengan live query):
         const [draftRows] = await db.execute(`
             SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
-            INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+            LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode   -- ✅ LEFT JOIN
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE 1=1 ${draftFilter}
@@ -1162,14 +1171,31 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
     const { tpk_nomor } = req.params;
     const { user_kode, user_hrd } = req.user;
     try {
+        // SESUDAH: Cek juga t_approval_mapping
         const found = await findPermintaan(db, tpk_nomor);
         if (!found) return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
 
         const peminta = found.row.tpk_peminta;
-        const [karyawan] = await db.execute('SELECT kar_nik_atasan FROM hrd2.tkaryawan WHERE kar_nik = ?', [peminta]);
-        const atasan = karyawan.length > 0 ? karyawan[0].kar_nik_atasan : null;
+        const bagian  = found.row.tpk_bagian;
 
-        if (user_hrd !== 1 && peminta !== user_kode && atasan !== user_kode) {
+        // Ambil atasan default DAN mapped approver secara bersamaan
+        const [accessRows] = await db.execute(
+            `SELECT 
+                k.kar_nik_atasan,
+                am.am_approver_nik as mapped_approver
+            FROM hrd2.tkaryawan k
+            LEFT JOIN rekruitmen2.t_approval_mapping am
+                ON am.am_bagian = ? AND am.am_active = 1
+            WHERE k.kar_nik = ?`,
+            [bagian, peminta]
+        );
+
+        const nik_atasan        = accessRows.length > 0 ? accessRows[0].kar_nik_atasan : null;
+        const mapped_approver   = accessRows.length > 0 ? accessRows[0].mapped_approver : null;
+        // Gunakan mapped approver jika ada, fallback ke atasan default
+        const effective_approver = mapped_approver?.trim() ?? nik_atasan?.trim();
+
+        if (user_hrd !== 1 && peminta !== user_kode && effective_approver !== user_kode) {
             return res.status(403).json({ success: false, message: 'Akses ditolak' });
         }
 
