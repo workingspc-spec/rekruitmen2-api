@@ -227,7 +227,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
             const [draftRows] = await db.execute(`
                 SELECT ${SELECT_COLS}
                 FROM ${DRAFT_TABLE} p
-                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
                 INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
                 ORDER BY p.tpk_tanggal DESC
@@ -248,7 +248,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
             const [draftRows] = await db.execute(`
                 SELECT ${SELECT_COLS}
                 FROM ${DRAFT_TABLE} p
-                INNER JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
+                LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
                 INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
                 WHERE TRIM(p.tpk_peminta) = ?
@@ -670,8 +670,18 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         if (status === 'rejected') statusFilter = 'AND p.tpk_approveatasan = 2';
 
         const SELECT_COLS_DRAFT = `
-            p.tpk_nomor, TRIM(p.tpk_peminta) as tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
-            p.tpk_approveatasan, p.tpk_approveHRD,
+            p.tpk_nomor,
+            TRIM(p.tpk_peminta) as tpk_peminta,
+            p.tpk_jab_kode,
+            COALESCE(
+                NULLIF(TRIM(j.jab_nama), ''),
+                NULLIF(TRIM(p.tpk_jab_kode), ''),
+                'Tanpa Jabatan'
+            ) as jab_nama,
+            p.tpk_bagian,
+            p.tpk_jumlah,
+            p.tpk_approveatasan,
+            p.tpk_approveHRD,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
             DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
@@ -681,13 +691,27 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         `;
 
         const SELECT_COLS_LIVE = `
-            p.tpk_nomor, TRIM(p.tpk_peminta) as tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
-            p.tpk_approveatasan, p.tpk_approveHRD,
+            p.tpk_nomor,
+            TRIM(p.tpk_peminta) as tpk_peminta,
+            p.tpk_jab_kode,
+            COALESCE(
+                NULLIF(TRIM(j.jab_nama), ''),
+                NULLIF(TRIM(p.tpk_jab_kode), ''),
+                'Tanpa Jabatan'
+            ) as jab_nama,
+            p.tpk_bagian,
+            p.tpk_jumlah,
+            p.tpk_approveHRD,
+            p.tpk_approveatasan,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
             DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
+            sla.sla_final_target_date,
+            sla.sla_source,
+            sla.sla_status,
+            COALESCE(sla.sla_hired_count, 0) as hired_count,
             CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
         `;
 
@@ -860,27 +884,51 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
         }
 
         const SELECT_COLS_DRAFT = `
-            p.tpk_nomor, p.tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
-            p.tpk_approveHRD, p.tpk_approveatasan,
+            p.tpk_nomor,
+            TRIM(p.tpk_peminta) as tpk_peminta,
+            p.tpk_jab_kode,
+            COALESCE(
+                NULLIF(TRIM(j.jab_nama), ''),
+                NULLIF(TRIM(p.tpk_jab_kode), ''),
+                'Tanpa Jabatan'
+            ) as jab_nama,
+            p.tpk_bagian,
+            p.tpk_jumlah,
+            p.tpk_approveHRD,
+            p.tpk_approveatasan,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
             DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
-            sla.sla_final_target_date, sla.sla_source, sla.sla_status,
+            sla.sla_final_target_date,
+            sla.sla_source,
+            sla.sla_status,
             COALESCE(sla.sla_hired_count, 0) as hired_count,
             0 as is_legacy
         `;
 
         const SELECT_COLS_LIVE = `
-            p.tpk_nomor, p.tpk_peminta, j.jab_nama, p.tpk_bagian, p.tpk_jumlah,
-            p.tpk_approveHRD, p.tpk_approveatasan,
+            p.tpk_nomor,
+            TRIM(p.tpk_peminta) as tpk_peminta,
+            p.tpk_jab_kode,
+            COALESCE(
+                NULLIF(TRIM(j.jab_nama), ''),
+                NULLIF(TRIM(p.tpk_jab_kode), ''),
+                'Tanpa Jabatan'
+            ) as jab_nama,
+            p.tpk_bagian,
+            p.tpk_jumlah,
+            p.tpk_approveHRD,
+            p.tpk_approveatasan,
             k.kar_nama as peminta,
             DATE_FORMAT(p.tpk_tanggal, '%Y-%m-%d') as tpk_tanggal,
             DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
-            sla.sla_final_target_date, sla.sla_source, sla.sla_status,
+            sla.sla_final_target_date,
+            sla.sla_source,
+            sla.sla_status,
             COALESCE(sla.sla_hired_count, 0) as hired_count,
             CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
         `;
