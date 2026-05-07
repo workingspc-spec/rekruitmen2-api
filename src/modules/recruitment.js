@@ -44,48 +44,96 @@ async function findPermintaan(conn, tpk_nomor) {
     return null;
 }
 
-async function validateTglButuhFromDB(connection, jab_kode, tgl_butuh, ignoreLeadTime = false) {
+async function validateTglButuhFromDB(
+    connection,
+    jab_kode,
+    tgl_butuh,
+    ignoreLeadTime = false,
+    jumlah = 1
+) {
     try {
         const today = new Date();
         today.setHours(0, 0, 0, 0);
+
         const [y, m, d] = tgl_butuh.split('-').map(Number);
         const requestedDate = new Date(y, m - 1, d, 0, 0, 0, 0);
 
         if (ignoreLeadTime) {
             if (requestedDate < today) {
-                return { valid: false, message: 'Untuk re-schedule, tanggal minimal adalah hari ini.' };
+                return {
+                    valid: false,
+                    message: 'Untuk re-schedule, tanggal minimal adalah hari ini.'
+                };
             }
+
             return { valid: true };
         }
 
         const [rows] = await connection.execute(
-            `SELECT COALESCE(jlt.jlt_min_days, 7) as min_days,
+            `SELECT 
+                    COALESCE(jlt.jlt_min_days, 7) as min_days,
                     COALESCE(jlt.jlt_is_flexible, 0) as is_flexible
              FROM hrd2.tjabatan j
              LEFT JOIN rekruitmen2.job_lead_time_master jlt
-                ON jlt.jlt_job_code = j.jab_kode AND jlt.jlt_active = 1
+                ON jlt.jlt_job_code = j.jab_kode 
+               AND jlt.jlt_active = 1
              WHERE j.jab_kode = ?`,
             [jab_kode]
         );
-        if (rows.length === 0) return { valid: false, message: 'Jabatan tidak ditemukan' };
+
+        if (rows.length === 0) {
+            return {
+                valid: false,
+                message: 'Jabatan tidak ditemukan'
+            };
+        }
 
         const { min_days, is_flexible } = rows[0];
-        if (is_flexible === 1) return { valid: true };
 
-        const tomorrow = new Date(today); //sepertinyadeadcodedantidakdigunakan
-        const minDateObj = addWorkdays(today, min_days);
+        if (is_flexible === 1) {
+            return { valid: true };
+        }
+
+        const jumlahNum = Number(jumlah) || 1;
+
+        let extraDays = 0;
+        if (jumlahNum > 1) {
+            if (jumlahNum <= 3) {
+                extraDays = 3;
+            } else if (jumlahNum <= 5) {
+                extraDays = 6;
+            } else {
+                extraDays = 6 + (jumlahNum - 5);
+            }
+        }
+
+        const baseMinDays = Number(min_days) || 7;
+        const adjustedMinDays = baseMinDays + extraDays;
+
+        const minDateObj = addWorkdays(today, adjustedMinDays);
         const minDateStr = formatDateSafe(minDateObj);
 
         if (requestedDate < minDateObj) {
+            const massalInfo = extraDays > 0
+                ? ` Untuk permintaan ${jumlahNum} orang, ditambah ${extraDays} hari kerja sehingga total minimal ${adjustedMinDays} hari kerja.`
+                : '';
+
             return {
                 valid: false,
-                message: `Tanggal butuh untuk jabatan ini minimal ${min_days} hari kerja dari besok. Saran tanggal: ${minDateStr}`,
+                message: `Tanggal butuh untuk jabatan ini minimal ${baseMinDays} hari kerja dari besok.${massalInfo} Saran tanggal: ${minDateStr}`,
                 minDate: minDateStr
             };
         }
-        return { valid: true, minDate: minDateStr };
+
+        return {
+            valid: true,
+            minDate: minDateStr
+        };
     } catch (error) {
-        return { valid: false, message: error.message };
+        return {
+            valid: false,
+            message: error.message
+        };
     }
 }
 
@@ -164,6 +212,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
             COALESCE(sla.sla_hired_count, 0) as hired_count,
+            0 as jml_pelamar,
             sla.sla_final_target_date,
             sla.sla_source,
             COALESCE(sla.sla_status, 'LEGACY') as sla_status,
@@ -369,7 +418,13 @@ router.post('/save', authenticate, async (req, res) => {
             }
 
             if (jab_kode && tgl_butuh) {
-                const validation = await validateTglButuhFromDB(connection, jab_kode, tgl_butuh, isEditable);
+                const validation = await validateTglButuhFromDB(
+                    connection,
+                    jab_kode,
+                    tgl_butuh,
+                    isEditable,
+                    jumlah
+                );
                 if (!validation.valid) {
                     await connection.rollback();
                     connection.release();
@@ -465,7 +520,13 @@ router.post('/save', authenticate, async (req, res) => {
 
         await connection.beginTransaction();
 
-        const validation = await validateTglButuhFromDB(connection, jab_kode, tgl_butuh, false);
+        const validation = await validateTglButuhFromDB(
+            connection,
+            jab_kode,
+            tgl_butuh,
+            false,
+            jumlah
+        );
         if (!validation.valid) {
             await connection.rollback();
             connection.release();
@@ -556,7 +617,14 @@ router.post('/save', authenticate, async (req, res) => {
 
         await connection.commit();
         connection.release();
-        return res.json({ success: true, message: 'Permintaan berhasil dibuat', nomor: newNomor });
+        return res.json({
+            success: true,
+            message: 'Permintaan berhasil dibuat',
+            nomor: newNomor,
+            data: {
+                nomor: newNomor
+            }
+        });
 
     } catch (error) {
         await connection.rollback();
@@ -690,15 +758,28 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
         // Ambil dari DRAFT saja
         const [checkRows] = await connection.execute(
-            `SELECT p.tpk_approveatasan, p.tpk_tanggal, p.tpk_tgl_butuh,
-                    p.tpk_jab_kode, p.tpk_jumlah, p.tpk_bagian, k.kar_nik_atasan,
+            `SELECT 
+                    TRIM(p.tpk_peminta) AS tpk_peminta,
+                    p.tpk_approveatasan,
+                    p.tpk_tanggal,
+                    p.tpk_tgl_butuh,
+                    p.tpk_jab_kode,
+                    p.tpk_jumlah,
+                    p.tpk_bagian,
+                    k.kar_nik_atasan,
                     am.am_approver_nik,
-                    sla.sla_id, sla.sla_original_requested_date, sla.sla_request_created_at
-             FROM ${DRAFT_TABLE} p
-             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-             LEFT JOIN rekruitmen2.t_approval_mapping am ON am.am_bagian = p.tpk_bagian AND am.am_active = 1
-             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-             WHERE p.tpk_nomor = ? FOR UPDATE`,
+                    sla.sla_id,
+                    sla.sla_original_requested_date,
+                    sla.sla_request_created_at
+            FROM ${DRAFT_TABLE} p
+            LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
+            LEFT JOIN rekruitmen2.t_approval_mapping am 
+                    ON am.am_bagian = p.tpk_bagian 
+                AND am.am_active = 1
+            LEFT JOIN rekruitmen2.t_recruitment_sla sla 
+                    ON sla.sla_tpk_nomor = p.tpk_nomor
+            WHERE p.tpk_nomor = ? 
+            FOR UPDATE`,
             [tpk_nomor]
         );
 
@@ -955,7 +1036,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             'SELECT jlt_min_days, jlt_max_days, jlt_is_flexible FROM rekruitmen2.job_lead_time_master WHERE jlt_job_code = ? AND jlt_active = 1',
             [current.tpk_jab_kode]
         );
-        let master = { jlt_min_days: 14, jlt_max_days: 30, jlt_is_flexible: 0 };
+        let master = { jlt_min_days: 7, jlt_max_days: 30, jlt_is_flexible: 0 };
         if (masterData.length > 0) master = masterData[0];
 
         const jumlahDiminta = current.tpk_jumlah || 1;
@@ -1052,6 +1133,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             success: true,
             message: 'HRD berhasil Approve — Rekrutmen Dibuka & SLA mulai dihitung.',
             data: {
+                message: 'HRD berhasil Approve — Rekrutmen Dibuka & SLA mulai dihitung.',
                 sla_info: {
                     explanation: explanationMsg,
                     original_requested_date: formatDateSafe(requestedDate),
