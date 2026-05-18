@@ -467,17 +467,26 @@ router.post('/save', authenticate, async (req, res) => {
                 return res.status(403).json({ success: false, message: 'Akses ditolak' });
             }
 
-            const isDraft    = current.tpk_approveatasan === 0 && current.tpk_approveHRD === 0;
+            const isDraft = Number(current.tpk_approveatasan || 0) === 0 && Number(current.tpk_approveHRD || 0) === 0;
             const [slaCheck] = await connection.execute(
                 'SELECT sla_is_editable FROM rekruitmen2.t_recruitment_sla WHERE sla_tpk_nomor = ?',
                 [tpk_nomor]
             );
-            const isEditable = slaCheck.length > 0 && slaCheck[0].sla_is_editable === 1;
+            const hasSla = slaCheck.length > 0;
+            const isEditable = hasSla && Number(slaCheck[0].sla_is_editable) === 1;
 
-            if (!isDraft && !isEditable) {
+            // SAFETY FIX:
+            // Edit normal hanya boleh untuk draft aktif yang masih punya row SLA.
+            // Data live/pending lama, data hasil testing, atau data PKAR baru yang SLA-nya hilang
+            // tidak boleh diedit lagi karena bisa membuat status approval/bypass menjadi ambigu.
+            // Live hanya boleh diedit jika HRD memang membuka izin edit ulang lewat sla_is_editable.
+            const canEditPendingDraft = source === 'draft' && isDraft && hasSla;
+            const canEditLiveReschedule = source === 'live' && isEditable;
+
+            if (!canEditPendingDraft && !canEditLiveReschedule) {
                 await connection.rollback();
                 connection.release();
-                return res.status(403).json({ success: false, message: 'Edit dikunci. Hubungi HRD jika ada kebutuhan mendesak.' });
+                return res.status(403).json({ success: false, message: 'Edit dikunci. Permintaan ini bukan draft aktif yang dapat diedit.' });
             }
 
             if (jab_kode && tgl_butuh) {
