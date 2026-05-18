@@ -215,9 +215,40 @@ router.get('/my-requests', authenticate, async (req, res) => {
             0 as jml_pelamar,
             sla.sla_final_target_date,
             sla.sla_source,
-            COALESCE(sla.sla_status, 'LEGACY') as sla_status,
+            COALESCE(
+                sla.sla_status,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM rekruitmen2.t_pkar_log l
+                        WHERE l.tpk_nomor = p.tpk_nomor
+                          AND l.field_name = 'created'
+                    )
+                    THEN 'SLA_MISSING'
+                    ELSE 'LEGACY'
+                END
+            ) as sla_status,
             COALESCE(sla.sla_is_editable, 0) as sla_is_editable,
-            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = p.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as is_legacy,
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = p.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as sla_missing
         `;
 
         let rows = [];
@@ -229,7 +260,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM ${DRAFT_TABLE} p
                 LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 ORDER BY p.tpk_tanggal DESC
             `);
             const [liveRows] = await db.execute(`
@@ -250,7 +281,7 @@ router.get('/my-requests', authenticate, async (req, res) => {
                 FROM ${DRAFT_TABLE} p
                 LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
                 LEFT JOIN hrd2.tkaryawan kp ON kp.kar_nik = TRIM(p.tpk_peminta)
-                INNER JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor -- 🔥 FIX: INNER JOIN
+                LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 WHERE TRIM(p.tpk_peminta) = ?
                 ORDER BY p.tpk_tanggal DESC
             `, [user_kode]);
@@ -308,13 +339,44 @@ router.get('/detail', authenticate, async (req, res) => {
             sla.sla_approval_delay_days,
             sla.sla_user_vs_system_diff_days,
             sla.sla_min_days,
-            sla.sla_status,
+            COALESCE(
+                sla.sla_status,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM rekruitmen2.t_pkar_log l
+                        WHERE l.tpk_nomor = t.tpk_nomor
+                          AND l.field_name = 'created'
+                    )
+                    THEN 'SLA_MISSING'
+                    ELSE 'LEGACY'
+                END
+            ) as sla_status,
             sla.sla_is_editable,
             sla.sla_notes,
             sla.sla_calculated_at,
             sla.sla_completed_at,
             sla.sla_hired_count,
-            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = t.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as is_legacy,
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = t.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as sla_missing
         `;
 
         // Cek draft dulu
@@ -687,7 +749,8 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             DATE_FORMAT(p.tpk_tgl_butuh, '%Y-%m-%d') as tpk_tgl_butuh,
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
-            0 as is_legacy
+            0 as is_legacy,
+            0 as sla_missing
         `;
 
         const SELECT_COLS_LIVE = `
@@ -710,9 +773,40 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
             sla.sla_final_target_date,
             sla.sla_source,
-            sla.sla_status,
+            COALESCE(
+                sla.sla_status,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM rekruitmen2.t_pkar_log l
+                        WHERE l.tpk_nomor = p.tpk_nomor
+                          AND l.field_name = 'created'
+                    )
+                    THEN 'SLA_MISSING'
+                    ELSE 'LEGACY'
+                END
+            ) as sla_status,
             COALESCE(sla.sla_hired_count, 0) as hired_count,
-            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = p.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as is_legacy,
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = p.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as sla_missing
         `;
 
         // ── 1. Ambil dari DRAFT ──
@@ -905,7 +999,8 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             sla.sla_source,
             sla.sla_status,
             COALESCE(sla.sla_hired_count, 0) as hired_count,
-            0 as is_legacy
+            0 as is_legacy,
+            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as sla_missing
         `;
 
         const SELECT_COLS_LIVE = `
@@ -928,9 +1023,40 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
             sla.sla_final_target_date,
             sla.sla_source,
-            sla.sla_status,
+            COALESCE(
+                sla.sla_status,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM rekruitmen2.t_pkar_log l
+                        WHERE l.tpk_nomor = p.tpk_nomor
+                          AND l.field_name = 'created'
+                    )
+                    THEN 'SLA_MISSING'
+                    ELSE 'LEGACY'
+                END
+            ) as sla_status,
             COALESCE(sla.sla_hired_count, 0) as hired_count,
-            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as is_legacy
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND NOT EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = p.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as is_legacy,
+            CASE
+                WHEN sla.sla_id IS NULL
+                 AND EXISTS (
+                    SELECT 1
+                    FROM rekruitmen2.t_pkar_log l
+                    WHERE l.tpk_nomor = p.tpk_nomor
+                      AND l.field_name = 'created'
+                 )
+                THEN 1 ELSE 0
+            END as sla_missing
         `;
 
         // Ambil dari DRAFT
@@ -1011,6 +1137,69 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
             });
         }
 
+        // SAFETY FIX:
+        // Jika row SLA hilang karena testing/manual delete/restore DB,
+        // buat ulang sebelum HRD approve/reject agar data PKAR baru tidak diproses tanpa SLA.
+        if (!current.sla_id) {
+            await connection.execute(
+                `INSERT INTO rekruitmen2.t_recruitment_sla
+                    (
+                        sla_tpk_nomor,
+                        sla_job_code,
+                        sla_original_requested_date,
+                        sla_system_ceiling_date,
+                        sla_request_created_at,
+                        sla_status,
+                        sla_notes
+                    )
+                 VALUES (?, ?, ?, ?, COALESCE(?, NOW()), 'PENDING', ?)
+                 ON DUPLICATE KEY UPDATE
+                    sla_job_code = VALUES(sla_job_code),
+                    sla_original_requested_date = VALUES(sla_original_requested_date),
+                    sla_system_ceiling_date = VALUES(sla_system_ceiling_date),
+                    sla_request_created_at = COALESCE(sla_request_created_at, VALUES(sla_request_created_at)),
+                    sla_status = CASE
+                        WHEN sla_status IS NULL THEN 'PENDING'
+                        ELSE sla_status
+                    END,
+                    sla_notes = LEFT(
+                        CONCAT(
+                            COALESCE(sla_notes, ''),
+                            CHAR(10), '[', NOW(), '] AUTO-REPAIR: SLA row dibuat/dipulihkan sebelum proses HRD.'
+                        ),
+                        ${MAX_NOTES_LENGTH}
+                    )`,
+                [
+                    current.tpk_nomor,
+                    current.tpk_jab_kode,
+                    current.tpk_tgl_butuh,
+                    current.tpk_tgl_butuh,
+                    current.tpk_tanggal,
+                    '[AUTO-REPAIR] SLA row dibuat ulang karena tidak ditemukan saat proses HRD.'
+                ]
+            );
+
+            const [repairedSlaRows] = await connection.execute(
+                `SELECT sla_id
+                 FROM rekruitmen2.t_recruitment_sla
+                 WHERE sla_tpk_nomor = ?`,
+                [tpk_nomor]
+            );
+
+            if (repairedSlaRows.length === 0) {
+                await connection.rollback();
+                connection.release();
+                return res.status(409).json({
+                    success: false,
+                    message: 'SLA tidak ditemukan dan gagal dibuat ulang. Proses HRD dibatalkan agar data tidak rusak.'
+                });
+            }
+
+            current.sla_id = repairedSlaRows[0].sla_id;
+            current.sla_original_requested_date = current.sla_original_requested_date || current.tpk_tgl_butuh;
+            current.sla_request_created_at = current.sla_request_created_at || current.tpk_tanggal;
+        }
+
         // ── REJECT — tetap di draft, update status ───────────────────────────
         if (action === 'REJECT') {
             await connection.execute(
@@ -1018,13 +1207,18 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 [tpk_nomor]
             );
             await syncApproval(connection, tpk_nomor, current.tpk_approveatasan, 2);
-            await connection.execute(
+            const [rejectSlaUpdateResult] = await connection.execute(
                 `UPDATE rekruitmen2.t_recruitment_sla SET
                     sla_status = 'CANCELLED',
-                    sla_notes  = LEFT(CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Ditolak HRD. Alasan: ', ?), ${MAX_NOTES_LENGTH})
+                    sla_notes  = LEFT(CONCAT(COALESCE(sla_notes,''), CHAR(10), '[', NOW(), '] Ditolak HRD. Alasan: ', ?), ${MAX_NOTES_LENGTH})
                  WHERE sla_tpk_nomor = ?`,
                 [alasan_tolak.trim(), tpk_nomor]
             );
+            if (rejectSlaUpdateResult.affectedRows === 0) {
+                await connection.rollback();
+                connection.release();
+                return res.status(409).json({ success: false, message: 'Penolakan HRD dibatalkan karena SLA tidak berhasil diupdate.' });
+            }
             await connection.commit();
             connection.release();
             return res.json({ success: true, message: 'Permintaan ditolak HRD.' });
@@ -1077,7 +1271,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         await connection.execute(`DELETE FROM ${DRAFT_TABLE} WHERE tpk_nomor = ?`, [tpk_nomor]);
 
         // Update shadow index → arahkan ke live
-        await syncApproval(connection, tpk_nomor, 1, 1);
+        await syncApproval(connection, tpk_nomor, current.tpk_approveatasan, 1);
 
         // Hitung SLA
         const [masterData] = await connection.execute(
@@ -1133,7 +1327,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         const bulkNote = extraDays > 0
             ? ` (Penambahan +${extraDays} hari massal ${jumlahDiminta} orang).` : '';
 
-        await connection.execute(
+        const [slaUpdateResult] = await connection.execute(
             `UPDATE rekruitmen2.t_recruitment_sla SET
                 sla_approved_at               = NOW(),
                 sla_approved_by               = ?,
@@ -1167,6 +1361,15 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 tpk_nomor
             ]
         );
+
+        if (slaUpdateResult.affectedRows === 0) {
+            await connection.rollback();
+            connection.release();
+            return res.status(409).json({
+                success: false,
+                message: 'Approval HRD dibatalkan karena SLA tidak berhasil dihitung.'
+            });
+        }
 
         await connection.commit();
         connection.release();
@@ -1336,9 +1539,9 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
                     k.kar_nama as user_nama, DATE_FORMAT(log.created_at,'%Y-%m-%d %H:%i:%s') as created_at
              FROM rekruitmen2.t_pkar_log log
              LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = log.user_kode
-             WHERE (log.sla_id = ? OR (log.sla_id IS NULL AND log.tpk_nomor = ?))
+             WHERE (log.tpk_nomor = ? OR log.sla_id = ?)
              ORDER BY log.created_at DESC`,
-            [sla_id, tpk_nomor]
+            [tpk_nomor, sla_id]
         );
         res.json({ success: true, data: logs });
     } catch (error) {
