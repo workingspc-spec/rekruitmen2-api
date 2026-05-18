@@ -248,7 +248,8 @@ router.get('/my-requests', authenticate, async (req, res) => {
                       AND l.field_name = 'created'
                  )
                 THEN 1 ELSE 0
-            END as sla_missing
+            END as sla_missing,
+            0 as can_process
         `;
 
         let rows = [];
@@ -750,7 +751,8 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             DATE_FORMAT(p.tpk_tgl_approveatasan, '%Y-%m-%d') as tgl_approve_atasan,
             DATE_FORMAT(p.tpk_tgl_approveHRD, '%Y-%m-%d') as tgl_approve_hrd,
             0 as is_legacy,
-            0 as sla_missing
+            0 as sla_missing,
+            CASE WHEN p.tpk_approveatasan = 0 THEN 1 ELSE 0 END as can_process
         `;
 
         const SELECT_COLS_LIVE = `
@@ -806,7 +808,8 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
                       AND l.field_name = 'created'
                  )
                 THEN 1 ELSE 0
-            END as sla_missing
+            END as sla_missing,
+            0 as can_process
         `;
 
         // ── 1. Ambil dari DRAFT ──
@@ -928,6 +931,14 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             connection.release();
             return res.status(400).json({ success: false, message: 'Sudah pernah diproses' });
         }
+        if (!data.sla_id) {
+            await connection.rollback();
+            connection.release();
+            return res.status(409).json({
+                success: false,
+                message: 'Permintaan ini tidak dapat diproses karena data SLA tidak ditemukan. Silakan buat ulang permintaan atau lakukan repair data.'
+            });
+        }
 
         await connection.execute(
             `UPDATE ${DRAFT_TABLE} SET tpk_approveatasan = ?, tpk_tgl_approveatasan = NOW() WHERE tpk_nomor = ?`,
@@ -936,20 +947,30 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
         await syncApproval(connection, tpk_nomor, statusVal, 0);
 
         if (statusVal === 9) {
-            await connection.execute(
+            const [atasanSlaUpdateResult] = await connection.execute(
                 `UPDATE rekruitmen2.t_recruitment_sla SET
                     sla_notes = LEFT(CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Disetujui Atasan. Menunggu HRD.'), ${MAX_NOTES_LENGTH})
                  WHERE sla_tpk_nomor = ? AND sla_status = 'PENDING'`,
                 [tpk_nomor]
             );
+            if (atasanSlaUpdateResult.affectedRows === 0) {
+                await connection.rollback();
+                connection.release();
+                return res.status(409).json({ success: false, message: 'Approval atasan dibatalkan karena SLA tidak berhasil diupdate.' });
+            }
             await connection.commit();
             connection.release();
             return res.json({ success: true, message: 'Di-APPROVE Atasan. Menunggu persetujuan HRD.' });
         } else {
-            await connection.execute(
+            const [atasanRejectSlaUpdateResult] = await connection.execute(
                 `UPDATE rekruitmen2.t_recruitment_sla SET sla_status = 'CANCELLED' WHERE sla_tpk_nomor = ?`,
                 [tpk_nomor]
             );
+            if (atasanRejectSlaUpdateResult.affectedRows === 0) {
+                await connection.rollback();
+                connection.release();
+                return res.status(409).json({ success: false, message: 'Penolakan atasan dibatalkan karena SLA tidak berhasil diupdate.' });
+            }
             await connection.commit();
             connection.release();
             return res.json({ success: true, message: 'Permintaan ditolak.' });
@@ -1000,7 +1021,8 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
             sla.sla_status,
             COALESCE(sla.sla_hired_count, 0) as hired_count,
             0 as is_legacy,
-            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as sla_missing
+            CASE WHEN sla.sla_id IS NULL THEN 1 ELSE 0 END as sla_missing,
+            CASE WHEN p.tpk_approveHRD = 0 AND sla.sla_id IS NOT NULL THEN 1 ELSE 0 END as can_process
         `;
 
         const SELECT_COLS_LIVE = `
@@ -1056,7 +1078,8 @@ router.get('/approval/hrd', authenticate, isHRD, async (req, res) => {
                       AND l.field_name = 'created'
                  )
                 THEN 1 ELSE 0
-            END as sla_missing
+            END as sla_missing,
+            0 as can_process
         `;
 
         // Ambil dari DRAFT
