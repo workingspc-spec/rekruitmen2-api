@@ -741,6 +741,16 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         if (status === 'approved') statusFilter = 'AND p.tpk_approveatasan IN (1, 9)';
         if (status === 'rejected') statusFilter = 'AND p.tpk_approveatasan = 2';
 
+        const RESOLVED_APPROVER_SQL = `
+            CASE
+                WHEN mappedApprover.kar_nik IS NOT NULL
+                AND NULLIF(TRIM(mappedApprover.kar_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                AND NULLIF(TRIM(mappedApprover.kar_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                THEN TRIM(am.am_approver_nik)
+                ELSE TRIM(k.kar_nik_atasan)
+            END
+        `;
+
         const SELECT_COLS_DRAFT = `
             p.tpk_nomor,
             TRIM(p.tpk_peminta) as tpk_peminta,
@@ -822,39 +832,38 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         `;
 
         // ── 1. Ambil dari DRAFT ──
+        // Resolver approver:
+        // - mapping dipakai hanya jika approver mapping satu dep+pab dengan peminta
+        // - jika tidak cocok, fallback ke kar_nik_atasan dari tkaryawan
         const [draftRows] = await db.execute(`
             SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            /* 👇 JOIN BERDASARKAN BAGIAN YANG DIPILIH DI FORM */
             LEFT JOIN rekruitmen2.t_approval_mapping am 
               ON am.am_bagian = p.tpk_bagian 
              AND am.am_active = 1
-            WHERE (
-                /* Jika ada mapping, gunakan NIK di mapping */
-                TRIM(am.am_approver_nik) = ? 
-                /* Jika tidak ada mapping (NULL), fallback ke atasan asli di profil */
-                OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?)
-            ) 
-            ${statusFilter} /* 👈 Gunakan variabel filter dinamis, BUKAN hardcode = 0 */
-        `, [user_kode, user_kode]);
+            LEFT JOIN hrd2.tkaryawan mappedApprover
+              ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
+            WHERE ${RESOLVED_APPROVER_SQL} = ?
+            ${statusFilter}
+        `, [user_kode]);
 
         // ── 2. Ambil dari LIVE (Untuk Riwayat "Sudah Approve") ──
+        // Gunakan resolver yang sama agar riwayat approval tidak pindah approver
+        // hanya karena mapping aktif berubah lintas dep/pab.
         const [liveRows] = await db.execute(`
             SELECT ${SELECT_COLS_LIVE} FROM ${LIVE_TABLE} p
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            /* 👇 JOIN MAPPING JUGA DI SINI */
             LEFT JOIN rekruitmen2.t_approval_mapping am 
               ON am.am_bagian = p.tpk_bagian 
              AND am.am_active = 1
-            WHERE (
-                TRIM(am.am_approver_nik) = ? 
-                OR (am.am_approver_nik IS NULL AND TRIM(k.kar_nik_atasan) = ?)
-            ) 
+            LEFT JOIN hrd2.tkaryawan mappedApprover
+              ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
+            WHERE ${RESOLVED_APPROVER_SQL} = ?
             ${statusFilter}
-        `, [user_kode, user_kode]);
+        `, [user_kode]);
 
         // Gabungkan dan urutkan
         const rows = [...draftRows, ...liveRows];
@@ -897,7 +906,11 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                     p.tpk_jumlah,
                     p.tpk_bagian,
                     k.kar_nik_atasan,
+                    k.kar_dep_kode AS peminta_dep_kode,
+                    k.kar_pab_kode AS peminta_pab_kode,
                     am.am_approver_nik,
+                    mappedApprover.kar_dep_kode AS mapped_dep_kode,
+                    mappedApprover.kar_pab_kode AS mapped_pab_kode,
                     sla.sla_id,
                     sla.sla_original_requested_date,
                     sla.sla_request_created_at
@@ -906,6 +919,8 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
             LEFT JOIN rekruitmen2.t_approval_mapping am 
                     ON am.am_bagian = p.tpk_bagian 
                 AND am.am_active = 1
+            LEFT JOIN hrd2.tkaryawan mappedApprover
+                    ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             LEFT JOIN rekruitmen2.t_recruitment_sla sla 
                     ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE p.tpk_nomor = ? 
@@ -921,7 +936,19 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
         const data = checkRows[0];
 
-        const validApprover = data.am_approver_nik ? data.am_approver_nik.trim() : data.kar_nik_atasan?.trim();
+        const mappingMatchesArea =
+            data.am_approver_nik &&
+            data.mapped_dep_kode &&
+            data.mapped_pab_kode &&
+            data.peminta_dep_kode &&
+            data.peminta_pab_kode &&
+            data.mapped_dep_kode.trim() === data.peminta_dep_kode.trim() &&
+            data.mapped_pab_kode.trim() === data.peminta_pab_kode.trim();
+
+        const validApprover = mappingMatchesArea
+            ? data.am_approver_nik.trim()
+            : data.kar_nik_atasan?.trim();
+
         if (validApprover !== req.user.user_kode) {
             await connection.rollback();
             connection.release();
@@ -1543,22 +1570,39 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
         const peminta = found.row.tpk_peminta;
         const bagian  = found.row.tpk_bagian;
 
-        // Ambil atasan default DAN mapped approver secara bersamaan
+        // Ambil atasan default dan mapped approver.
+        // Mapping hanya berlaku jika approver mapping satu dep+pab dengan peminta.
         const [accessRows] = await db.execute(
             `SELECT 
                 k.kar_nik_atasan,
-                am.am_approver_nik as mapped_approver
+                k.kar_dep_kode AS peminta_dep_kode,
+                k.kar_pab_kode AS peminta_pab_kode,
+                am.am_approver_nik AS mapped_approver,
+                mappedApprover.kar_dep_kode AS mapped_dep_kode,
+                mappedApprover.kar_pab_kode AS mapped_pab_kode
             FROM hrd2.tkaryawan k
             LEFT JOIN rekruitmen2.t_approval_mapping am
                 ON am.am_bagian = ? AND am.am_active = 1
+            LEFT JOIN hrd2.tkaryawan mappedApprover
+                ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             WHERE k.kar_nik = ?`,
             [bagian, peminta]
         );
 
-        const nik_atasan        = accessRows.length > 0 ? accessRows[0].kar_nik_atasan : null;
-        const mapped_approver   = accessRows.length > 0 ? accessRows[0].mapped_approver : null;
-        // Gunakan mapped approver jika ada, fallback ke atasan default
-        const effective_approver = mapped_approver?.trim() ?? nik_atasan?.trim();
+        const access = accessRows.length > 0 ? accessRows[0] : {};
+
+        const mappingMatchesArea =
+            access.mapped_approver &&
+            access.mapped_dep_kode &&
+            access.mapped_pab_kode &&
+            access.peminta_dep_kode &&
+            access.peminta_pab_kode &&
+            access.mapped_dep_kode.trim() === access.peminta_dep_kode.trim() &&
+            access.mapped_pab_kode.trim() === access.peminta_pab_kode.trim();
+
+        const effective_approver = mappingMatchesArea
+            ? access.mapped_approver.trim()
+            : access.kar_nik_atasan?.trim();
 
         if (user_hrd !== 1 && peminta !== user_kode && effective_approver !== user_kode) {
             return res.status(403).json({ success: false, message: 'Akses ditolak' });
