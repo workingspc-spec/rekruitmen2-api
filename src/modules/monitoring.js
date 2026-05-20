@@ -5,6 +5,33 @@ const { authenticate, isHRD } = require('../middleware/authMiddleware');
 const { countWorkdays }       = require('../utils/workdayCalculator');
 const router  = express.Router();
 
+
+/**
+ * Resolver approver aktif.
+ * Mapping t_approval_mapping hanya dipakai jika approver mapping berada pada dep+pab
+ * yang sama dengan peminta. Jika tidak cocok, fallback ke tkaryawan.kar_nik_atasan.
+ * Ini mencegah bagian yang namanya sama lintas pabrik/departemen salah masuk approver.
+ */
+const RESOLVED_APPROVER_SQL_K = `
+    CASE
+        WHEN mappedApprover.kar_nik IS NOT NULL
+         AND NULLIF(TRIM(mappedApprover.kar_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+         AND NULLIF(TRIM(mappedApprover.kar_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+        THEN TRIM(am.am_approver_nik)
+        ELSE TRIM(k.kar_nik_atasan)
+    END
+`;
+
+const RESOLVED_APPROVER_SQL_PEMINTA = `
+    CASE
+        WHEN mappedApprover.kar_nik IS NOT NULL
+         AND NULLIF(TRIM(mappedApprover.kar_dep_kode), '') = NULLIF(TRIM(peminta.kar_dep_kode), '')
+         AND NULLIF(TRIM(mappedApprover.kar_pab_kode), '') = NULLIF(TRIM(peminta.kar_pab_kode), '')
+        THEN TRIM(am.am_approver_nik)
+        ELSE TRIM(peminta.kar_nik_atasan)
+    END
+`;
+
 /**
  * =====================================================================
  * HELPER: Build KPI date filter
@@ -95,7 +122,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
             whereClause = `
                 WHERE (
                         h.tpk_peminta = ?
-                        OR COALESCE(NULLIF(TRIM(am.am_approver_nik), ''), k.kar_nik_atasan) = ?
+                        OR ${RESOLVED_APPROVER_SQL_K} = ?
                     )
                   AND sla.sla_status IN ("CALCULATED", "COMPLETED")
             `;
@@ -148,7 +175,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                         ELSE NULL
                     END AS approval_flag,
 
-                    CASE WHEN COALESCE(NULLIF(TRIM(am.am_approver_nik), ''), k.kar_nik_atasan) = ? THEN 1 ELSE 0 END as is_bawahan
+                    CASE WHEN ${RESOLVED_APPROVER_SQL_K} = ? THEN 1 ELSE 0 END as is_bawahan
 
                 FROM hrd2.tpermintaankaryawan p
                 JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
@@ -157,11 +184,10 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 LEFT JOIN rekruitmen2.t_approval_mapping am
                        ON am.am_bagian = p.tpk_bagian
                       AND am.am_active = 1
+                LEFT JOIN hrd2.tkaryawan mappedApprover
+                       ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
                 LEFT JOIN hrd2.tkaryawan approver
-                       ON approver.kar_nik = COALESCE(
-                            NULLIF(TRIM(am.am_approver_nik), ''),
-                            k.kar_nik_atasan
-                       )
+                       ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_K}
                 WHERE sla.sla_status IN ("CALCULATED", "COMPLETED")
                 ORDER BY
                     CASE WHEN sla.sla_is_editable = 1 THEN 0
@@ -212,7 +238,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
                         ELSE NULL
                     END AS approval_flag,
 
-                    CASE WHEN COALESCE(NULLIF(TRIM(am.am_approver_nik), ''), k.kar_nik_atasan) = ? THEN 1 ELSE 0 END as is_bawahan
+                    CASE WHEN ${RESOLVED_APPROVER_SQL_K} = ? THEN 1 ELSE 0 END as is_bawahan
 
                 FROM rekruitmen2.tpk_index_helper h
                 JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = h.tpk_nomor
@@ -222,14 +248,13 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 LEFT JOIN rekruitmen2.t_approval_mapping am
                        ON am.am_bagian = p.tpk_bagian
                       AND am.am_active = 1
+                LEFT JOIN hrd2.tkaryawan mappedApprover
+                       ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
                 LEFT JOIN hrd2.tkaryawan approver
-                       ON approver.kar_nik = COALESCE(
-                            NULLIF(TRIM(am.am_approver_nik), ''),
-                            k.kar_nik_atasan
-                       )
+                       ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_K}
                 WHERE (
                         h.tpk_peminta = ?
-                        OR COALESCE(NULLIF(TRIM(am.am_approver_nik), ''), k.kar_nik_atasan) = ?
+                        OR ${RESOLVED_APPROVER_SQL_K} = ?
                     )
                   AND sla.sla_status IN ("CALCULATED", "COMPLETED")
                 ORDER BY
@@ -291,7 +316,12 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                  p.tpk_peminta,
                  p.tpk_bagian,
                  k.kar_nik_atasan,
-                 am.am_approver_nik AS mapped_approver
+                 k.kar_dep_kode AS peminta_dep_kode,
+                 k.kar_pab_kode AS peminta_pab_kode,
+                 am.am_approver_nik AS mapped_approver,
+                 mappedApprover.kar_dep_kode AS mapped_dep_kode,
+                 mappedApprover.kar_pab_kode AS mapped_pab_kode,
+                 ${RESOLVED_APPROVER_SQL_K} AS effective_approver
              FROM (
                  SELECT tpk_nomor, tpk_peminta, tpk_bagian FROM rekruitmen2.tpermintaan_draft
                  UNION ALL
@@ -301,6 +331,8 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
              LEFT JOIN rekruitmen2.t_approval_mapping am
                     ON am.am_bagian = p.tpk_bagian
                    AND am.am_active = 1
+             LEFT JOIN hrd2.tkaryawan mappedApprover
+                    ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
              WHERE p.tpk_nomor = ?`,
             [tpk_nomor]
         );
@@ -309,7 +341,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Data tidak ditemukan' });
         }
 
-        const effectiveApprover = authCheck[0].mapped_approver?.trim() || authCheck[0].kar_nik_atasan?.trim();
+        const effectiveApprover = authCheck[0].effective_approver?.trim();
         const isAuthorized =
             user_hrd === 1 ||
             authCheck[0].tpk_peminta === user_kode ||
@@ -340,11 +372,10 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
              LEFT JOIN rekruitmen2.t_approval_mapping am
                        ON am.am_bagian = p.tpk_bagian
                       AND am.am_active = 1
+                LEFT JOIN hrd2.tkaryawan mappedApprover
+                       ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
                 LEFT JOIN hrd2.tkaryawan approver
-                       ON approver.kar_nik = COALESCE(
-                            NULLIF(TRIM(am.am_approver_nik), ''),
-                            k.kar_nik_atasan
-                       )
+                       ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_K}
              WHERE sla.sla_tpk_nomor = ?`,
             [tpk_nomor]
         );
@@ -413,7 +444,12 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
                  p.tpk_peminta,
                  p.tpk_bagian,
                  k.kar_nik_atasan,
-                 am.am_approver_nik AS mapped_approver
+                 k.kar_dep_kode AS peminta_dep_kode,
+                 k.kar_pab_kode AS peminta_pab_kode,
+                 am.am_approver_nik AS mapped_approver,
+                 mappedApprover.kar_dep_kode AS mapped_dep_kode,
+                 mappedApprover.kar_pab_kode AS mapped_pab_kode,
+                 ${RESOLVED_APPROVER_SQL_K} AS effective_approver
              FROM (
                  SELECT tpk_nomor, tpk_peminta, tpk_bagian FROM rekruitmen2.tpermintaan_draft
                  UNION ALL
@@ -423,6 +459,8 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
              LEFT JOIN rekruitmen2.t_approval_mapping am
                     ON am.am_bagian = p.tpk_bagian
                    AND am.am_active = 1
+             LEFT JOIN hrd2.tkaryawan mappedApprover
+                    ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
              WHERE p.tpk_nomor = ?`,
             [tpk_nomor]
         );
@@ -431,7 +469,7 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
             return res.status(404).json({ success: false, message: 'Permintaan tidak ditemukan' });
         }
 
-        const effectiveApprover = authCheck[0].mapped_approver?.trim() || authCheck[0].kar_nik_atasan?.trim();
+        const effectiveApprover = authCheck[0].effective_approver?.trim();
         const isAuthorized =
             user_hrd === 1 ||
             authCheck[0].tpk_peminta === user_kode ||
@@ -621,11 +659,10 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
             LEFT JOIN rekruitmen2.t_approval_mapping am
                    ON am.am_bagian = p.tpk_bagian
                   AND am.am_active = 1
+            LEFT JOIN hrd2.tkaryawan mappedApprover
+                   ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             LEFT JOIN hrd2.tkaryawan approver
-                   ON approver.kar_nik = COALESCE(
-                        NULLIF(TRIM(am.am_approver_nik), ''),
-                        peminta.kar_nik_atasan
-                   )
+                   ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_PEMINTA}
             WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
               AND sla.sla_approved_at IS NOT NULL
               ${dateCondition}
@@ -648,11 +685,10 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
             LEFT JOIN rekruitmen2.t_approval_mapping am
                    ON am.am_bagian = p.tpk_bagian
                   AND am.am_active = 1
+            LEFT JOIN hrd2.tkaryawan mappedApprover
+                   ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             LEFT JOIN hrd2.tkaryawan approver
-                   ON approver.kar_nik = COALESCE(
-                        NULLIF(TRIM(am.am_approver_nik), ''),
-                        peminta.kar_nik_atasan
-                   )
+                   ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_PEMINTA}
             WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
               AND sla.sla_approved_at IS NOT NULL
               ${dateCondition}
@@ -715,7 +751,7 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
         const shadowJoin  = user_hrd === 1 ? '' : 'JOIN rekruitmen2.tpk_index_helper h ON h.tpk_nomor = sla.sla_tpk_nomor';
         const userFilter  = user_hrd === 1 ? '' : `AND (
             h.tpk_peminta = ?
-            OR COALESCE(NULLIF(TRIM(am.am_approver_nik), ''), k.kar_nik_atasan) = ?
+            OR ${RESOLVED_APPROVER_SQL_K} = ?
         )`;
         const userParams  = user_hrd === 1 ? [] : [user_kode, user_kode];
 
@@ -727,6 +763,8 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             LEFT JOIN rekruitmen2.t_approval_mapping am
                    ON am.am_bagian = p.tpk_bagian
                   AND am.am_active = 1
+            LEFT JOIN hrd2.tkaryawan mappedApprover
+                   ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
         `;
         const baseWhere = `WHERE 1=1 ${userFilter}`;
 
