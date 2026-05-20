@@ -374,9 +374,14 @@ router.get('/approval-mapping', isHRD, async (req, res) => {
             SELECT 
                 am.am_id, 
                 am.am_bagian, 
-                am.am_approver_nik, 
+                am.am_approver_nik,
+                am.am_dep_kode,
+                am.am_pab_kode,
+                COALESCE(am.am_priority, 100) AS am_priority,
                 am.am_active,
                 k.kar_nama as approver_name,
+                k.kar_dep_kode as approver_dep_kode,
+                k.kar_pab_kode as approver_pab_kode,
                 j.jab_nama as approver_jabatan
             FROM rekruitmen2.t_approval_mapping am
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = am.am_approver_nik
@@ -390,7 +395,7 @@ router.get('/approval-mapping', isHRD, async (req, res) => {
 });
 
 router.post('/approval-mapping', isHRD, async (req, res) => {
-    const { am_bagian, am_approver_nik } = req.body;
+    const { am_bagian, am_approver_nik, am_dep_kode, am_pab_kode, am_priority } = req.body;
 
     if (!am_bagian || !am_approver_nik) {
         return res.status(400).json({ success: false, message: 'Bagian dan NIK Approver wajib diisi' });
@@ -403,12 +408,20 @@ router.post('/approval-mapping', isHRD, async (req, res) => {
         }
 
         await db.execute(
-            `INSERT INTO rekruitmen2.t_approval_mapping (am_bagian, am_approver_nik, am_active) 
-             VALUES (?, ?, 1)
-             ON DUPLICATE KEY UPDATE 
+            `INSERT INTO rekruitmen2.t_approval_mapping
+                (am_bagian, am_dep_kode, am_pab_kode, am_approver_nik, am_active, am_priority)
+             VALUES (?, ?, ?, ?, 1, ?)
+             ON DUPLICATE KEY UPDATE
                 am_approver_nik = VALUES(am_approver_nik),
-                am_active = 1`,
-            [am_bagian.trim(), am_approver_nik.trim()]
+                am_active = 1,
+                am_priority = VALUES(am_priority)`,
+            [
+                am_bagian.trim(),
+                am_dep_kode?.trim() || null,
+                am_pab_kode?.trim() || null,
+                am_approver_nik.trim(),
+                Number.isFinite(Number(am_priority)) ? Number(am_priority) : 100
+            ]
         );
 
         res.json({ success: true, message: 'Mapping berhasil disimpan' });
@@ -419,7 +432,7 @@ router.post('/approval-mapping', isHRD, async (req, res) => {
 
 router.patch('/approval-mapping/:id', isHRD, async (req, res) => {
     const { id } = req.params;
-    const { am_approver_nik, am_active } = req.body;
+    const { am_approver_nik, am_active, am_dep_kode, am_pab_kode, am_priority } = req.body;
 
     const updates = [];
     const params  = [];
@@ -457,6 +470,22 @@ router.patch('/approval-mapping/:id', isHRD, async (req, res) => {
     if (am_active !== undefined) {
         updates.push('am_active = ?');
         params.push(am_active ? 1 : 0);
+    }
+    if (am_dep_kode !== undefined) {
+        updates.push('am_dep_kode = ?');
+        params.push(am_dep_kode?.trim() || null);
+    }
+    if (am_pab_kode !== undefined) {
+        updates.push('am_pab_kode = ?');
+        params.push(am_pab_kode?.trim() || null);
+    }
+    if (am_priority !== undefined) {
+        const priority = Number(am_priority);
+        if (!Number.isFinite(priority) || priority < 1 || priority > 999) {
+            return res.status(400).json({ success: false, message: 'Priority harus angka 1–999' });
+        }
+        updates.push('am_priority = ?');
+        params.push(priority);
     }
     
     if (updates.length === 0) return res.status(400).json({ success: false, message: 'Tidak ada data yang diubah' });

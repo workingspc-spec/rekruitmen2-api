@@ -7,29 +7,88 @@ const router  = express.Router();
 
 
 /**
- * Resolver approver aktif.
- * Mapping t_approval_mapping hanya dipakai jika approver mapping berada pada dep+pab
- * yang sama dengan peminta. Jika tidak cocok, fallback ke tkaryawan.kar_nik_atasan.
- * Ini mencegah bagian yang namanya sama lintas pabrik/departemen salah masuk approver.
+ * Resolver approver aktif berbasis scope.
+ * Urutan prioritas:
+ * 1) bagian + dep + pab
+ * 2) bagian + pab
+ * 3) bagian + dep
+ * 4) bagian global
+ * 5) fallback tkaryawan.kar_nik_atasan
  */
 const RESOLVED_APPROVER_SQL_K = `
-    CASE
-        WHEN mappedApprover.kar_nik IS NOT NULL
-         AND NULLIF(TRIM(mappedApprover.kar_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
-         AND NULLIF(TRIM(mappedApprover.kar_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
-        THEN TRIM(am.am_approver_nik)
-        ELSE TRIM(k.kar_nik_atasan)
-    END
+    COALESCE((
+                SELECT TRIM(am2.am_approver_nik)
+                FROM rekruitmen2.t_approval_mapping am2
+                WHERE am2.am_active = 1
+                  AND TRIM(am2.am_bagian) = TRIM(p.tpk_bagian)
+                  AND (
+                        am2.am_dep_kode IS NULL
+                     OR TRIM(am2.am_dep_kode) = ''
+                     OR TRIM(am2.am_dep_kode) = TRIM(k.kar_dep_kode)
+                  )
+                  AND (
+                        am2.am_pab_kode IS NULL
+                     OR TRIM(am2.am_pab_kode) = ''
+                     OR TRIM(am2.am_pab_kode) = TRIM(k.kar_pab_kode)
+                  )
+                ORDER BY
+                    CASE
+                        WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                         AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                        THEN 1
+                        WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                         AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                        THEN 2
+                        WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                         AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                        THEN 3
+                        WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                         AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                        THEN 4
+                        ELSE 99
+                    END,
+                    COALESCE(am2.am_priority, 100),
+                    am2.am_id
+                LIMIT 1
+            ), TRIM(k.kar_nik_atasan))
 `;
 
 const RESOLVED_APPROVER_SQL_PEMINTA = `
-    CASE
-        WHEN mappedApprover.kar_nik IS NOT NULL
-         AND NULLIF(TRIM(mappedApprover.kar_dep_kode), '') = NULLIF(TRIM(peminta.kar_dep_kode), '')
-         AND NULLIF(TRIM(mappedApprover.kar_pab_kode), '') = NULLIF(TRIM(peminta.kar_pab_kode), '')
-        THEN TRIM(am.am_approver_nik)
-        ELSE TRIM(peminta.kar_nik_atasan)
-    END
+    COALESCE((
+                SELECT TRIM(am2.am_approver_nik)
+                FROM rekruitmen2.t_approval_mapping am2
+                WHERE am2.am_active = 1
+                  AND TRIM(am2.am_bagian) = TRIM(p.tpk_bagian)
+                  AND (
+                        am2.am_dep_kode IS NULL
+                     OR TRIM(am2.am_dep_kode) = ''
+                     OR TRIM(am2.am_dep_kode) = TRIM(peminta.kar_dep_kode)
+                  )
+                  AND (
+                        am2.am_pab_kode IS NULL
+                     OR TRIM(am2.am_pab_kode) = ''
+                     OR TRIM(am2.am_pab_kode) = TRIM(peminta.kar_pab_kode)
+                  )
+                ORDER BY
+                    CASE
+                        WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(peminta.kar_dep_kode), '')
+                         AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(peminta.kar_pab_kode), '')
+                        THEN 1
+                        WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                         AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(peminta.kar_pab_kode), '')
+                        THEN 2
+                        WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(peminta.kar_dep_kode), '')
+                         AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                        THEN 3
+                        WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                         AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                        THEN 4
+                        ELSE 99
+                    END,
+                    COALESCE(am2.am_priority, 100),
+                    am2.am_id
+                LIMIT 1
+            ), TRIM(peminta.kar_nik_atasan))
 `;
 
 /**
@@ -181,11 +240,6 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 JOIN hrd2.tjabatan j ON j.jab_kode = sla.sla_job_code
                 LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
-                LEFT JOIN rekruitmen2.t_approval_mapping am
-                       ON am.am_bagian = p.tpk_bagian
-                      AND am.am_active = 1
-                LEFT JOIN hrd2.tkaryawan mappedApprover
-                       ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
                 LEFT JOIN hrd2.tkaryawan approver
                        ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_K}
                 WHERE sla.sla_status IN ("CALCULATED", "COMPLETED")
@@ -245,11 +299,6 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
                 JOIN hrd2.tjabatan j ON j.jab_kode = sla.sla_job_code
                 LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
-                LEFT JOIN rekruitmen2.t_approval_mapping am
-                       ON am.am_bagian = p.tpk_bagian
-                      AND am.am_active = 1
-                LEFT JOIN hrd2.tkaryawan mappedApprover
-                       ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
                 LEFT JOIN hrd2.tkaryawan approver
                        ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_K}
                 WHERE (
@@ -318,9 +367,6 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                  k.kar_nik_atasan,
                  k.kar_dep_kode AS peminta_dep_kode,
                  k.kar_pab_kode AS peminta_pab_kode,
-                 am.am_approver_nik AS mapped_approver,
-                 mappedApprover.kar_dep_kode AS mapped_dep_kode,
-                 mappedApprover.kar_pab_kode AS mapped_pab_kode,
                  ${RESOLVED_APPROVER_SQL_K} AS effective_approver
              FROM (
                  SELECT tpk_nomor, tpk_peminta, tpk_bagian FROM rekruitmen2.tpermintaan_draft
@@ -328,11 +374,6 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                  SELECT tpk_nomor, tpk_peminta, tpk_bagian FROM hrd2.tpermintaankaryawan
              ) p
              LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
-             LEFT JOIN rekruitmen2.t_approval_mapping am
-                    ON am.am_bagian = p.tpk_bagian
-                   AND am.am_active = 1
-             LEFT JOIN hrd2.tkaryawan mappedApprover
-                    ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
              WHERE p.tpk_nomor = ?`,
             [tpk_nomor]
         );
@@ -369,11 +410,6 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
              JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
              JOIN hrd2.tjabatan j ON j.jab_kode = sla.sla_job_code
              LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
-             LEFT JOIN rekruitmen2.t_approval_mapping am
-                       ON am.am_bagian = p.tpk_bagian
-                      AND am.am_active = 1
-                LEFT JOIN hrd2.tkaryawan mappedApprover
-                       ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
                 LEFT JOIN hrd2.tkaryawan approver
                        ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_K}
              WHERE sla.sla_tpk_nomor = ?`,
@@ -446,9 +482,6 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
                  k.kar_nik_atasan,
                  k.kar_dep_kode AS peminta_dep_kode,
                  k.kar_pab_kode AS peminta_pab_kode,
-                 am.am_approver_nik AS mapped_approver,
-                 mappedApprover.kar_dep_kode AS mapped_dep_kode,
-                 mappedApprover.kar_pab_kode AS mapped_pab_kode,
                  ${RESOLVED_APPROVER_SQL_K} AS effective_approver
              FROM (
                  SELECT tpk_nomor, tpk_peminta, tpk_bagian FROM rekruitmen2.tpermintaan_draft
@@ -456,11 +489,6 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
                  SELECT tpk_nomor, tpk_peminta, tpk_bagian FROM hrd2.tpermintaankaryawan
              ) p
              LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
-             LEFT JOIN rekruitmen2.t_approval_mapping am
-                    ON am.am_bagian = p.tpk_bagian
-                   AND am.am_active = 1
-             LEFT JOIN hrd2.tkaryawan mappedApprover
-                    ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
              WHERE p.tpk_nomor = ?`,
             [tpk_nomor]
         );
@@ -656,11 +684,6 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
             JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN hrd2.tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN hrd2.tkaryawan peminta ON peminta.kar_nik = p.tpk_peminta
-            LEFT JOIN rekruitmen2.t_approval_mapping am
-                   ON am.am_bagian = p.tpk_bagian
-                  AND am.am_active = 1
-            LEFT JOIN hrd2.tkaryawan mappedApprover
-                   ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             LEFT JOIN hrd2.tkaryawan approver
                    ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_PEMINTA}
             WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
@@ -682,11 +705,6 @@ router.get('/kpi-approver', authenticate, async (req, res) => {
             FROM rekruitmen2.t_recruitment_sla sla
             JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             LEFT JOIN hrd2.tkaryawan peminta ON peminta.kar_nik = p.tpk_peminta
-            LEFT JOIN rekruitmen2.t_approval_mapping am
-                   ON am.am_bagian = p.tpk_bagian
-                  AND am.am_active = 1
-            LEFT JOIN hrd2.tkaryawan mappedApprover
-                   ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             LEFT JOIN hrd2.tkaryawan approver
                    ON approver.kar_nik = ${RESOLVED_APPROVER_SQL_PEMINTA}
             WHERE sla.sla_status IN ('CALCULATED', 'COMPLETED')
@@ -760,11 +778,6 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
             ${shadowJoin}
             LEFT JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
-            LEFT JOIN rekruitmen2.t_approval_mapping am
-                   ON am.am_bagian = p.tpk_bagian
-                  AND am.am_active = 1
-            LEFT JOIN hrd2.tkaryawan mappedApprover
-                   ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
         `;
         const baseWhere = `WHERE 1=1 ${userFilter}`;
 

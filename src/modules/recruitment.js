@@ -742,13 +742,41 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
         if (status === 'rejected') statusFilter = 'AND p.tpk_approveatasan = 2';
 
         const RESOLVED_APPROVER_SQL = `
-            CASE
-                WHEN mappedApprover.kar_nik IS NOT NULL
-                AND NULLIF(TRIM(mappedApprover.kar_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
-                AND NULLIF(TRIM(mappedApprover.kar_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
-                THEN TRIM(am.am_approver_nik)
-                ELSE TRIM(k.kar_nik_atasan)
-            END
+            COALESCE((
+                SELECT TRIM(am2.am_approver_nik)
+                FROM rekruitmen2.t_approval_mapping am2
+                WHERE am2.am_active = 1
+                  AND TRIM(am2.am_bagian) = TRIM(p.tpk_bagian)
+                  AND (
+                        am2.am_dep_kode IS NULL
+                     OR TRIM(am2.am_dep_kode) = ''
+                     OR TRIM(am2.am_dep_kode) = TRIM(k.kar_dep_kode)
+                  )
+                  AND (
+                        am2.am_pab_kode IS NULL
+                     OR TRIM(am2.am_pab_kode) = ''
+                     OR TRIM(am2.am_pab_kode) = TRIM(k.kar_pab_kode)
+                  )
+                ORDER BY
+                    CASE
+                        WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                         AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                        THEN 1
+                        WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                         AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                        THEN 2
+                        WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                         AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                        THEN 3
+                        WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                         AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                        THEN 4
+                        ELSE 99
+                    END,
+                    COALESCE(am2.am_priority, 100),
+                    am2.am_id
+                LIMIT 1
+            ), TRIM(k.kar_nik_atasan))
         `;
 
         const SELECT_COLS_DRAFT = `
@@ -839,11 +867,6 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             SELECT ${SELECT_COLS_DRAFT} FROM ${DRAFT_TABLE} p
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            LEFT JOIN rekruitmen2.t_approval_mapping am 
-              ON am.am_bagian = p.tpk_bagian 
-             AND am.am_active = 1
-            LEFT JOIN hrd2.tkaryawan mappedApprover
-              ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             WHERE ${RESOLVED_APPROVER_SQL} = ?
             ${statusFilter}
         `, [user_kode]);
@@ -856,11 +879,6 @@ router.get('/approval/atasan', authenticate, isManager, async (req, res) => {
             LEFT JOIN hrd2.tjabatan j ON j.jab_kode = p.tpk_jab_kode
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
             LEFT JOIN rekruitmen2.t_recruitment_sla sla ON sla.sla_tpk_nomor = p.tpk_nomor
-            LEFT JOIN rekruitmen2.t_approval_mapping am 
-              ON am.am_bagian = p.tpk_bagian 
-             AND am.am_active = 1
-            LEFT JOIN hrd2.tkaryawan mappedApprover
-              ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             WHERE ${RESOLVED_APPROVER_SQL} = ?
             ${statusFilter}
         `, [user_kode]);
@@ -908,19 +926,46 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
                     k.kar_nik_atasan,
                     k.kar_dep_kode AS peminta_dep_kode,
                     k.kar_pab_kode AS peminta_pab_kode,
-                    am.am_approver_nik,
-                    mappedApprover.kar_dep_kode AS mapped_dep_kode,
-                    mappedApprover.kar_pab_kode AS mapped_pab_kode,
+                    COALESCE((
+                                    SELECT TRIM(am2.am_approver_nik)
+                                    FROM rekruitmen2.t_approval_mapping am2
+                                    WHERE am2.am_active = 1
+                                      AND TRIM(am2.am_bagian) = TRIM(p.tpk_bagian)
+                                      AND (
+                                            am2.am_dep_kode IS NULL
+                                         OR TRIM(am2.am_dep_kode) = ''
+                                         OR TRIM(am2.am_dep_kode) = TRIM(k.kar_dep_kode)
+                                      )
+                                      AND (
+                                            am2.am_pab_kode IS NULL
+                                         OR TRIM(am2.am_pab_kode) = ''
+                                         OR TRIM(am2.am_pab_kode) = TRIM(k.kar_pab_kode)
+                                      )
+                                    ORDER BY
+                                        CASE
+                                            WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                                             AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                                            THEN 1
+                                            WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                                             AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                                            THEN 2
+                                            WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                                             AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                                            THEN 3
+                                            WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                                             AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                                            THEN 4
+                                            ELSE 99
+                                        END,
+                                        COALESCE(am2.am_priority, 100),
+                                        am2.am_id
+                                    LIMIT 1
+                                ), TRIM(k.kar_nik_atasan)) AS effective_approver,
                     sla.sla_id,
                     sla.sla_original_requested_date,
                     sla.sla_request_created_at
             FROM ${DRAFT_TABLE} p
             LEFT JOIN hrd2.tkaryawan k ON k.kar_Nik = p.tpk_peminta
-            LEFT JOIN rekruitmen2.t_approval_mapping am 
-                    ON am.am_bagian = p.tpk_bagian 
-                AND am.am_active = 1
-            LEFT JOIN hrd2.tkaryawan mappedApprover
-                    ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             LEFT JOIN rekruitmen2.t_recruitment_sla sla 
                     ON sla.sla_tpk_nomor = p.tpk_nomor
             WHERE p.tpk_nomor = ? 
@@ -936,18 +981,7 @@ router.post('/approval/atasan/action', authenticate, isManager, async (req, res)
 
         const data = checkRows[0];
 
-        const mappingMatchesArea =
-            data.am_approver_nik &&
-            data.mapped_dep_kode &&
-            data.mapped_pab_kode &&
-            data.peminta_dep_kode &&
-            data.peminta_pab_kode &&
-            data.mapped_dep_kode.trim() === data.peminta_dep_kode.trim() &&
-            data.mapped_pab_kode.trim() === data.peminta_pab_kode.trim();
-
-        const validApprover = mappingMatchesArea
-            ? data.am_approver_nik.trim()
-            : data.kar_nik_atasan?.trim();
+        const validApprover = data.effective_approver?.trim();
 
         if (validApprover !== req.user.user_kode) {
             await connection.rollback();
@@ -1570,39 +1604,56 @@ router.get('/log/:tpk_nomor', authenticate, async (req, res) => {
         const peminta = found.row.tpk_peminta;
         const bagian  = found.row.tpk_bagian;
 
-        // Ambil atasan default dan mapped approver.
-        // Mapping hanya berlaku jika approver mapping satu dep+pab dengan peminta.
+        // Ambil approver efektif dengan resolver scope:
+        // 1) bagian+dep+pab, 2) bagian+pab, 3) bagian+dep, 4) bagian global,
+        // lalu fallback ke kar_nik_atasan dari tkaryawan.
         const [accessRows] = await db.execute(
             `SELECT 
                 k.kar_nik_atasan,
                 k.kar_dep_kode AS peminta_dep_kode,
                 k.kar_pab_kode AS peminta_pab_kode,
-                am.am_approver_nik AS mapped_approver,
-                mappedApprover.kar_dep_kode AS mapped_dep_kode,
-                mappedApprover.kar_pab_kode AS mapped_pab_kode
+                COALESCE((
+                    SELECT TRIM(am2.am_approver_nik)
+                    FROM rekruitmen2.t_approval_mapping am2
+                    WHERE am2.am_active = 1
+                      AND TRIM(am2.am_bagian) = ?
+                      AND (
+                            am2.am_dep_kode IS NULL
+                         OR TRIM(am2.am_dep_kode) = ''
+                         OR TRIM(am2.am_dep_kode) = TRIM(k.kar_dep_kode)
+                      )
+                      AND (
+                            am2.am_pab_kode IS NULL
+                         OR TRIM(am2.am_pab_kode) = ''
+                         OR TRIM(am2.am_pab_kode) = TRIM(k.kar_pab_kode)
+                      )
+                    ORDER BY
+                        CASE
+                            WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                             AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                            THEN 1
+                            WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                             AND NULLIF(TRIM(am2.am_pab_kode), '') = NULLIF(TRIM(k.kar_pab_kode), '')
+                            THEN 2
+                            WHEN NULLIF(TRIM(am2.am_dep_kode), '') = NULLIF(TRIM(k.kar_dep_kode), '')
+                             AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                            THEN 3
+                            WHEN (am2.am_dep_kode IS NULL OR TRIM(am2.am_dep_kode) = '')
+                             AND (am2.am_pab_kode IS NULL OR TRIM(am2.am_pab_kode) = '')
+                            THEN 4
+                            ELSE 99
+                        END,
+                        COALESCE(am2.am_priority, 100),
+                        am2.am_id
+                    LIMIT 1
+                ), TRIM(k.kar_nik_atasan)) AS effective_approver
             FROM hrd2.tkaryawan k
-            LEFT JOIN rekruitmen2.t_approval_mapping am
-                ON am.am_bagian = ? AND am.am_active = 1
-            LEFT JOIN hrd2.tkaryawan mappedApprover
-                ON mappedApprover.kar_nik = TRIM(am.am_approver_nik)
             WHERE k.kar_nik = ?`,
             [bagian, peminta]
         );
 
         const access = accessRows.length > 0 ? accessRows[0] : {};
-
-        const mappingMatchesArea =
-            access.mapped_approver &&
-            access.mapped_dep_kode &&
-            access.mapped_pab_kode &&
-            access.peminta_dep_kode &&
-            access.peminta_pab_kode &&
-            access.mapped_dep_kode.trim() === access.peminta_dep_kode.trim() &&
-            access.mapped_pab_kode.trim() === access.peminta_pab_kode.trim();
-
-        const effective_approver = mappingMatchesArea
-            ? access.mapped_approver.trim()
-            : access.kar_nik_atasan?.trim();
+        const effective_approver = access.effective_approver?.trim();
 
         if (user_hrd !== 1 && peminta !== user_kode && effective_approver !== user_kode) {
             return res.status(403).json({ success: false, message: 'Akses ditolak' });
