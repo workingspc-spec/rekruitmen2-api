@@ -24,6 +24,72 @@ const MAX_NOTES_LENGTH = 3000;
 const DRAFT_TABLE = 'rekruitmen2.tpermintaan_draft';
 const LIVE_TABLE  = 'hrd2.tpermintaankaryawan';
 
+async function generateUniqueTpkNomor(connection, date = new Date()) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+
+    await connection.execute(
+        `INSERT INTO rekruitmen2.tpk_sequence (seq_year, seq_last)
+         VALUES (?, 0)
+         ON DUPLICATE KEY UPDATE seq_year = seq_year`,
+        [year]
+    );
+
+    const [seqRows] = await connection.execute(
+        `SELECT seq_last
+         FROM rekruitmen2.tpk_sequence
+         WHERE seq_year = ?
+         FOR UPDATE`,
+        [year]
+    );
+
+    let nextSeq = Number(seqRows?.[0]?.seq_last || 0);
+
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+        nextSeq += 1;
+
+        const nomor = `${String(nextSeq).padStart(3, '0')}/HRD/PKAR/${month}/${year}`;
+
+        const [existsRows] = await connection.execute(
+            `SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM ${DRAFT_TABLE}
+                    WHERE tpk_nomor = ?
+                ) AS exists_draft,
+                (
+                    SELECT COUNT(*)
+                    FROM ${LIVE_TABLE}
+                    WHERE tpk_nomor = ?
+                ) AS exists_live,
+                (
+                    SELECT COUNT(*)
+                    FROM rekruitmen2.tpk_index_helper
+                    WHERE tpk_nomor = ?
+                ) AS exists_helper`,
+            [nomor, nomor, nomor]
+        );
+
+        const exists =
+            Number(existsRows[0].exists_draft || 0) +
+            Number(existsRows[0].exists_live || 0) +
+            Number(existsRows[0].exists_helper || 0);
+
+        if (exists === 0) {
+            await connection.execute(
+                `UPDATE rekruitmen2.tpk_sequence
+                 SET seq_last = ?
+                 WHERE seq_year = ?`,
+                [nextSeq, year]
+            );
+
+            return nomor;
+        }
+    }
+
+    throw new Error('Gagal membuat nomor PKAR unik setelah 300 percobaan.');
+}
+
 /**
  * Helper: cari permintaan di draft dulu, lalu live.
  * Return: { row, source: 'draft'|'live' } atau null
@@ -605,20 +671,7 @@ router.post('/save', authenticate, async (req, res) => {
             return res.status(400).json({ success: false, message: validation.message, min_date: validation.minDate });
         }
 
-        const now   = new Date();
-        const year  = now.getFullYear();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-
-        await connection.execute(
-            `INSERT INTO rekruitmen2.tpk_sequence (seq_year, seq_last)
-             VALUES (?, 1)
-             ON DUPLICATE KEY UPDATE seq_last = seq_last + 1`,
-            [year]
-        );
-        const [[{ seq }]] = await connection.execute(
-            `SELECT seq_last AS seq FROM rekruitmen2.tpk_sequence WHERE seq_year = ?`, [year]
-        );
-        const newNomor = `${String(seq).padStart(3, '0')}/HRD/PKAR/${month}/${year}`;
+        const newNomor = await generateUniqueTpkNomor(connection, new Date());
 
         // ── [BYPASS CHECK] Cek apakah peminta terdaftar sebagai bypass user ──
         // Jika ya → tpk_approveatasan = 9 (langsung antri HRD, skip atasan)
