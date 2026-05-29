@@ -161,7 +161,13 @@ function buildKpiDateFilter(period, dateColumn) {
 // Gunakan target final sebagai deadline utama.
 // Jika final target kosong, fallback ke max target.
 // =====================================================================
-const SLA_EFFECTIVE_DEADLINE_SQL = `COALESCE(sla.sla_final_target_date, sla.sla_max_target_date)`;
+const SLA_EFFECTIVE_DEADLINE_SQL = `
+    COALESCE(
+        GREATEST(sla.sla_final_target_date, sla.sla_max_target_date),
+        sla.sla_final_target_date,
+        sla.sla_max_target_date
+    )
+`;
 const SLA_DAYS_REMAINING_SQL = `DATEDIFF(${SLA_EFFECTIVE_DEADLINE_SQL}, CURDATE())`;
 
 // =====================================================================
