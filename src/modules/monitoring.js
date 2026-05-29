@@ -157,6 +157,14 @@ function buildKpiDateFilter(period, dateColumn) {
 }
 
 // =====================================================================
+// HELPER: SLA effective deadline
+// Gunakan target final sebagai deadline utama.
+// Jika final target kosong, fallback ke max target.
+// =====================================================================
+const SLA_EFFECTIVE_DEADLINE_SQL = `COALESCE(sla.sla_final_target_date, sla.sla_max_target_date)`;
+const SLA_DAYS_REMAINING_SQL = `DATEDIFF(${SLA_EFFECTIVE_DEADLINE_SQL}, CURDATE())`;
+
+// =====================================================================
 // GET /api/monitoring/sla-status
 //
 // [OPTIMASI] Query ini join tpermintaankaryawan melalui PK (tpk_nomor)
@@ -215,7 +223,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
 
                     approver.kar_nama AS approver_name,
 
-                    DATEDIFF(sla.sla_max_target_date, CURDATE()) as days_remaining,
+                    ${SLA_DAYS_REMAINING_SQL} as days_remaining,
                     p.tpk_jumlah as target_count,
 
                     ROUND((COALESCE(sla.sla_hired_count, 0) / NULLIF(p.tpk_jumlah, 0)) * 100) AS progress_percentage,
@@ -223,9 +231,9 @@ router.get('/sla-status', authenticate, async (req, res) => {
                     CASE
                         WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                         WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
-                        WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'
-                        WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
-                        WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'
+                        WHEN CURDATE() > ${SLA_EFFECTIVE_DEADLINE_SQL} THEN 'OVERDUE'
+                        WHEN ${SLA_DAYS_REMAINING_SQL} <= 3 THEN 'CRITICAL'
+                        WHEN ${SLA_DAYS_REMAINING_SQL} <= 7 THEN 'WARNING'
                         ELSE 'ON_PROGRESS'
                     END as ui_status_tag,
 
@@ -245,8 +253,8 @@ router.get('/sla-status', authenticate, async (req, res) => {
                 WHERE sla.sla_status IN ("CALCULATED", "COMPLETED")
                 ORDER BY
                     CASE WHEN sla.sla_is_editable = 1 THEN 0
-                         WHEN CURDATE() > sla.sla_max_target_date THEN 1
-                         ELSE 2 END ASC,
+                        WHEN CURDATE() > ${SLA_EFFECTIVE_DEADLINE_SQL} THEN 1
+                        ELSE 2 END ASC,
                     days_remaining ASC
             `
             : `
@@ -273,7 +281,7 @@ router.get('/sla-status', authenticate, async (req, res) => {
 
                     approver.kar_nama AS approver_name,
 
-                    DATEDIFF(sla.sla_max_target_date, CURDATE()) as days_remaining,
+                    ${SLA_DAYS_REMAINING_SQL} as days_remaining,
                     p.tpk_jumlah as target_count,
 
                     ROUND((COALESCE(sla.sla_hired_count, 0) / NULLIF(p.tpk_jumlah, 0)) * 100) AS progress_percentage,
@@ -281,9 +289,9 @@ router.get('/sla-status', authenticate, async (req, res) => {
                     CASE
                         WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                         WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
-                        WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'
-                        WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
-                        WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'
+                        WHEN CURDATE() > ${SLA_EFFECTIVE_DEADLINE_SQL} THEN 'OVERDUE'
+                        WHEN ${SLA_DAYS_REMAINING_SQL} <= 3 THEN 'CRITICAL'
+                        WHEN ${SLA_DAYS_REMAINING_SQL} <= 7 THEN 'WARNING'
                         ELSE 'ON_PROGRESS'
                     END as ui_status_tag,
 
@@ -308,8 +316,8 @@ router.get('/sla-status', authenticate, async (req, res) => {
                   AND sla.sla_status IN ("CALCULATED", "COMPLETED")
                 ORDER BY
                     CASE WHEN sla.sla_is_editable = 1 THEN 0
-                         WHEN CURDATE() > sla.sla_max_target_date THEN 1
-                         ELSE 2 END ASC,
+                        WHEN CURDATE() > ${SLA_EFFECTIVE_DEADLINE_SQL} THEN 1
+                        ELSE 2 END ASC,
                     days_remaining ASC
             `;
 
@@ -400,7 +408,7 @@ router.get('/sla-detail/:tpk_nomor', authenticate, async (req, res) => {
                 p.tpk_bagian,
                 p.tpk_peminta,
                 k.kar_nama AS nama_peminta,
-                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining,
+                ${SLA_DAYS_REMAINING_SQL} as days_remaining,
                 approver.kar_nama AS approver_name,
                 CASE
                     WHEN sla.sla_approval_delay_days > 5 THEN 'APPROVAL_DELAYED'
@@ -518,13 +526,13 @@ router.get('/sla-dashboard/:tpk_nomor', authenticate, async (req, res) => {
                 sla.sla_hired_count,
                 j.jab_nama,
                 p.tpk_jumlah,
-                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining,
+                ${SLA_DAYS_REMAINING_SQL} as days_remaining,
                 CASE
                     WHEN sla.sla_status = 'COMPLETED' THEN 'COMPLETED'
                     WHEN sla.sla_is_editable = 1 THEN 'NEED_USER_UPDATE'
-                    WHEN CURDATE() > sla.sla_max_target_date THEN 'OVERDUE'
-                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 3 THEN 'CRITICAL'
-                    WHEN DATEDIFF(sla.sla_max_target_date, CURDATE()) <= 7 THEN 'WARNING'
+                    WHEN CURDATE() > ${SLA_EFFECTIVE_DEADLINE_SQL} THEN 'OVERDUE'
+                    WHEN ${SLA_DAYS_REMAINING_SQL} <= 3 THEN 'CRITICAL'
+                    WHEN ${SLA_DAYS_REMAINING_SQL} <= 7 THEN 'WARNING'
                     ELSE 'ON_PROGRESS'
                 END AS ui_status
              FROM rekruitmen2.t_recruitment_sla sla
@@ -787,10 +795,10 @@ router.get('/dashboard-summary', authenticate, async (req, res) => {
         );
 
         const [overdueRequests] = await db.execute(
-            `SELECT COUNT(*) as count ${baseFrom} ${baseWhere} AND sla.sla_status = 'CALCULATED' AND CURDATE() > sla.sla_max_target_date`,
+            `SELECT COUNT(*) as count ${baseFrom} ${baseWhere} AND sla.sla_status = 'CALCULATED' AND CURDATE() > ${SLA_EFFECTIVE_DEADLINE_SQL}`,
             userParams
         );
-
+        
         const [needUpdate] = await db.execute(
             `SELECT COUNT(*) as count ${baseFrom} ${baseWhere} AND sla.sla_status = 'CALCULATED' AND sla.sla_is_editable = 1`,
             userParams
@@ -838,14 +846,14 @@ router.get('/check-deadline', authenticate, isHRD, async (req, res) => {
                 k.kar_nama AS nama_peminta,
                 sla.sla_final_target_date,
                 sla.sla_max_target_date,
-                DATEDIFF(sla.sla_max_target_date, CURDATE()) AS days_remaining
+                ${SLA_DAYS_REMAINING_SQL} as days_remaining
             FROM rekruitmen2.t_recruitment_sla sla
             JOIN hrd2.tpermintaankaryawan p ON p.tpk_nomor = sla.sla_tpk_nomor
             JOIN hrd2.tjabatan j ON j.jab_kode = sla.sla_job_code
             LEFT JOIN hrd2.tkaryawan k ON k.kar_nik = p.tpk_peminta
             WHERE sla.sla_status = 'CALCULATED'
               AND sla.sla_is_editable = 0
-              AND DATEDIFF(sla.sla_max_target_date, CURDATE()) BETWEEN 0 AND 3
+              AND ${SLA_DAYS_REMAINING_SQL} BETWEEN 0 AND 3
             ORDER BY days_remaining ASC
         `);
 
