@@ -599,7 +599,10 @@ router.post('/save', authenticate, async (req, res) => {
                         sla_job_code = ?, sla_original_requested_date = ?, sla_system_ceiling_date = ?,
                         sla_source = CASE WHEN ? >= sla_system_floor_date THEN 'USER' ELSE sla_source END,
                         sla_final_target_date = GREATEST(COALESCE(sla_system_floor_date, CURDATE()), ?),
-                        sla_max_target_date   = GREATEST(sla_max_target_date, ?),
+                        sla_max_target_date   = GREATEST(
+                            COALESCE(sla_max_target_date, CURDATE()),
+                            GREATEST(COALESCE(sla_system_floor_date, CURDATE()), ?)
+                        ),
                         sla_is_editable = 0,
                         sla_notes = LEFT(CONCAT(COALESCE(sla_notes,''), '\n[', NOW(), '] Re-schedule oleh User (New Date: ', ?, ')'), ${MAX_NOTES_LENGTH})
                     WHERE sla_tpk_nomor = ?`,
@@ -1449,23 +1452,41 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
         const requestedDate = new Date(ry, rm - 1, rd, 0, 0, 0, 0);
         const createdAt     = new Date(current.sla_request_created_at || current.tpk_tanggal);
 
-        let systemFloorDate, finalTargetDate, maxTargetDate, slaSource;
+        let systemFloorDate = null;
+        let systemCeilingDate = null;
+        let finalTargetDate;
+        let maxTargetDate;
+        let slaSource;
         const approvalDelayDays = countWorkdays(createdAt, approvedAt);
 
         if (master.jlt_is_flexible === 1) {
-            finalTargetDate = requestedDate;
-            maxTargetDate   = requestedDate;
+            // Jabatan fleksibel: tanggal user adalah komitmen final sekaligus deadline.
+            finalTargetDate  = requestedDate;
+            maxTargetDate    = requestedDate;
+            systemCeilingDate = requestedDate;
             slaSource = 'FLEXIBLE';
         } else {
-            systemFloorDate = addWorkdays(approvedAt, master.jlt_min_days);
-            maxTargetDate   = addWorkdays(approvedAt, master.jlt_max_days);
+            // Floor/ceiling tetap menyimpan standar HRD berdasarkan lead time master.
+            // Contoh STF 5-7 hari: floor = approved + 5 hari kerja, ceiling = approved + 7 hari kerja.
+            systemFloorDate   = addWorkdays(approvedAt, master.jlt_min_days);
+            systemCeilingDate = addWorkdays(approvedAt, master.jlt_max_days);
+
             if (systemFloorDate.getTime() > requestedDate.getTime()) {
+                // User minta terlalu cepat, maka sistem menaikkan ke minimal lead time.
                 finalTargetDate = systemFloorDate;
                 slaSource = 'SYSTEM';
             } else {
-                systemFloorDate = requestedDate;
+                // User minta tanggal yang masih bisa diterima/lebih longgar.
+                // Target final mengikuti tanggal butuh user yang disetujui HRD.
                 finalTargetDate = requestedDate;
                 slaSource = 'USER';
+            }
+
+            // Deadline operasional tidak boleh lebih awal dari target yang sudah disepakati.
+            // Ini mencegah kasus 080: target final 01 Juli tetapi batas maksimal masih 04 Juni.
+            maxTargetDate = systemCeilingDate;
+            if (finalTargetDate.getTime() > maxTargetDate.getTime()) {
+                maxTargetDate = finalTargetDate;
             }
         }
 
@@ -1482,6 +1503,7 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 sla_max_days                  = ?,
                 sla_is_flexible               = ?,
                 sla_system_floor_date         = ?,
+                sla_system_ceiling_date       = ?,
                 sla_final_target_date         = ?,
                 sla_max_target_date           = ?,
                 sla_original_requested_date   = ?,
@@ -1496,9 +1518,10 @@ router.post('/approval/hrd/action', authenticate, isHRD, async (req, res) => {
                 master.jlt_min_days, 
                 master.jlt_max_days, 
                 master.jlt_is_flexible,
-                formatDateSafe(systemFloorDate), 
+                formatDateSafe(systemFloorDate),
+                formatDateSafe(systemCeilingDate),
                 formatDateSafe(finalTargetDate),
-                formatDateSafe(maxTargetDate), 
+                formatDateSafe(maxTargetDate),
                 formatDateSafe(requestedDate),
                 slaSource, 
                 approvalDelayDays, 
